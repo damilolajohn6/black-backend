@@ -64,6 +64,16 @@ const userSchema = new mongoose.Schema({
       addressType: { type: String },
     },
   ],
+  shippingAddress: [
+    {
+      country: { type: String },
+      city: { type: String },
+      address1: { type: String },
+      address2: { type: String },
+      zipCode: { type: Number },
+      addressType: { type: String },
+    },
+  ],
   role: {
     type: String,
     enum: ["user", "seller", "instructor", "serviceProvider", "admin"],
