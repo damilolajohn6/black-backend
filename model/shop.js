@@ -87,7 +87,7 @@ const shopSchema = new mongoose.Schema({
     details: {
       type: Object,
     },
-  },
+  }, // Optional to avoid validation issues; run migration to fix existing invalid values
   availableBalance: {
     type: Number,
     default: 0,

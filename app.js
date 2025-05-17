@@ -9,12 +9,14 @@ const app = express();
 
 // CORS middleware
 app.use(
-  cors({
+  cors(
+    {
     origin: ["http://localhost:3000", "https://blacksell.vercel.app"],
     credentials: true,
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"],
-  })
+  }
+)
 );
 
 // Express middleware
