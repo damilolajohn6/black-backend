@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const Shop = require("../model/shop");
 const Withdraw = require("../model/withdraw");
@@ -12,42 +13,59 @@ router.post(
   "/create-withdraw-request",
   isSeller,
   catchAsyncErrors(async (req, res, next) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { amount, withdrawMethod } = req.body;
 
       // Validate input
       if (!amount || amount < 10) {
-        return next(new ErrorHandler("Minimum withdrawal amount is $10", 400));
+        throw new ErrorHandler("Minimum withdrawal amount is $10", 400);
       }
       if (amount > 10000) {
-        return next(
-          new ErrorHandler("Maximum withdrawal amount is $10,000", 400)
-        );
+        throw new ErrorHandler("Maximum withdrawal amount is $10,000", 400);
       }
       if (!withdrawMethod?.type || !withdrawMethod?.details) {
-        return next(new ErrorHandler("Withdrawal method is required", 400));
+        throw new ErrorHandler("Withdrawal method is required", 400);
       }
-      if (!["BankTransfer", "PayPal", "Other"].includes(withdrawMethod.type)) {
-        return next(new ErrorHandler("Invalid withdrawal method type", 400));
+
+      // Normalize withdrawMethod.type to match schema enum
+      const validMethods = ["BankTransfer", "PayPal", "Other"];
+      const normalizedMethodType = withdrawMethod.type
+        ? validMethods.find(
+            (method) =>
+              method.toLowerCase() === withdrawMethod.type.toLowerCase()
+          )
+        : null;
+      if (!normalizedMethodType) {
+        throw new ErrorHandler(
+          `Invalid withdrawal method type: ${
+            withdrawMethod.type
+          }. Must be one of ${validMethods.join(", ")}`,
+          400
+        );
       }
 
       // Validate shop
-      const shop = await Shop.findById(req.seller._id);
+      const shop = await Shop.findById(req.seller._id).session(session);
       if (!shop) {
-        return next(new ErrorHandler("Shop not found", 404));
+        throw new ErrorHandler("Shop not found", 404);
       }
       if (!shop.isVerified) {
-        return next(new ErrorHandler("Shop is not verified", 403));
+        throw new ErrorHandler("Shop is not verified", 403);
       }
       if (shop.availableBalance < amount) {
-        return next(new ErrorHandler("Insufficient available balance", 400));
+        throw new ErrorHandler("Insufficient available balance", 400);
       }
 
       // Create withdrawal
       const withdrawData = {
         seller: shop._id,
         amount,
-        withdrawMethod,
+        withdrawMethod: {
+          type: normalizedMethodType, // Use normalized type
+          details: withdrawMethod.details,
+        },
         statusHistory: [
           {
             status: "Processing",
@@ -57,60 +75,65 @@ router.post(
         ],
       };
 
-      const withdraw = await Withdraw.create(withdrawData);
+      const withdraw = await Withdraw.create([withdrawData], { session });
 
       // Update shop balance and transactions
       shop.availableBalance -= amount;
       shop.pendingBalance += amount;
       shop.transactions.push({
-        withdrawId: withdraw._id,
+        withdrawId: withdraw[0]._id,
         amount,
         type: "Withdrawal",
         status: "Processing",
         createdAt: new Date(),
-        metadata: { withdrawMethod: withdrawMethod.type },
+        metadata: { withdrawMethod: normalizedMethodType },
       });
-      await shop.save();
+      await shop.save({ session });
 
       // Send email notification
       try {
         await sendMail({
           email: shop.email,
           subject: "Withdrawal Request Created",
-          message: `Hello ${shop.name}, your withdrawal request of $${amount} via ${withdrawMethod.type} is being processed. It will take 3-7 days to complete.`,
+          message: `Hello ${shop.name}, your withdrawal request of $${amount} via ${normalizedMethodType} is being processed. It will take 3-7 days to complete.`,
         });
       } catch (error) {
         console.error("Email send error:", {
           message: error.message,
           shopId: shop._id,
-          withdrawId: withdraw._id,
+          withdrawId: withdraw[0]._id,
         });
         // Continue despite email failure
       }
 
+      await session.commitTransaction();
       console.info("create-withdraw-request: Withdrawal created", {
-        withdrawId: withdraw._id,
+        withdrawId: withdraw[0]._id,
         shopId: shop._id,
         amount,
-        method: withdrawMethod.type,
+        method: normalizedMethodType,
       });
 
       res.status(201).json({
         success: true,
-        withdraw,
+        withdraw: withdraw[0],
       });
     } catch (error) {
+      await session.abortTransaction();
       console.error("create-withdraw-request error:", {
         message: error.message,
         shopId: req.seller?._id,
         amount: req.body.amount,
+        withdrawMethod: req.body.withdrawMethod,
       });
       return next(new ErrorHandler(error.message, 400));
+    } finally {
+      session.endSession();
     }
   })
 );
 
-// Get all withdrawals --- seller view
+// Other routes remain unchanged
 router.get(
   "/get-my-withdrawals",
   isSeller,
@@ -170,7 +193,6 @@ router.get(
   })
 );
 
-// Get all withdrawals --- admin view
 router.get(
   "/get-all-withdraw-request",
   isAuthenticated,
@@ -211,59 +233,66 @@ router.get(
   })
 );
 
-// Update withdrawal request --- admin only
 router.put(
   "/update-withdraw-request/:id",
   isAuthenticated,
   isAdmin("Admin"),
   catchAsyncErrors(async (req, res, next) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { status, reason } = req.body;
 
       // Validate status
       if (!["Approved", "Rejected", "Succeeded", "Failed"].includes(status)) {
-        return next(new ErrorHandler("Invalid status", 400));
+        throw new ErrorHandler("Invalid status", 400);
       }
       if (["Rejected", "Failed"].includes(status) && !reason) {
-        return next(
-          new ErrorHandler("Reason is required for rejection or failure", 400)
+        throw new ErrorHandler(
+          "Reason is required for rejection or failure",
+          400
         );
       }
 
       // Find withdrawal
-      const withdraw = await Withdraw.findById(req.params.id).populate(
-        "seller",
-        "name email"
-      );
+      const withdraw = await Withdraw.findById(req.params.id)
+        .populate("seller", "name email")
+        .session(session);
       if (!withdraw) {
-        return next(new ErrorHandler("Withdrawal request not found", 404));
+        throw new ErrorHandler("Withdrawal request not found", 404);
       }
       if (["Succeeded", "Failed"].includes(withdraw.status)) {
-        return next(new ErrorHandler("Withdrawal is already finalized", 400));
+        throw new ErrorHandler("Withdrawal is already finalized", 400);
       }
 
       // Update withdrawal
       withdraw.status = status;
-      if (reason) {
-        withdraw.statusHistory.push({
-          status,
-          updatedAt: new Date(),
-          reason,
-        });
+      withdraw.statusHistory.push({
+        status,
+        updatedAt: new Date(),
+        reason: reason || "Status updated",
+      });
+      if (["Succeeded", "Failed"].includes(status)) {
+        withdraw.processedAt = new Date();
       }
-      await withdraw.save();
 
       // Update shop
-      const shop = await Shop.findById(withdraw.seller._id);
+      const shop = await Shop.findById(withdraw.seller._id).session(session);
       if (!shop) {
-        return next(new ErrorHandler("Shop not found", 404));
+        throw new ErrorHandler("Shop not found", 404);
       }
 
       if (status === "Succeeded") {
-        shop.pendingBalance -= withdraw.amount;
+        shop.pendingBalance = Math.max(
+          0,
+          (shop.pendingBalance || 0) - withdraw.amount
+        );
       } else if (status === "Rejected" || status === "Failed") {
-        shop.pendingBalance -= withdraw.amount;
-        shop.availableBalance += withdraw.amount;
+        shop.pendingBalance = Math.max(
+          0,
+          (shop.pendingBalance || 0) - withdraw.amount
+        );
+        shop.availableBalance = (shop.availableBalance || 0) + withdraw.amount;
       }
 
       // Update shop transaction
@@ -276,16 +305,17 @@ router.put(
         if (reason) transaction.metadata.reason = reason;
       }
 
-      await shop.save();
+      await withdraw.save({ session });
+      await shop.save({ session });
 
       // Send email notification
       try {
         await sendMail({
           email: shop.email,
           subject: `Withdrawal Request ${status}`,
-          message: `Hello ${
-            shop.name
-          }, your withdrawal request of $${withdraw.amount} via ${
+          message: `Hello ${shop.name}, your withdrawal request of $${
+            withdraw.amount
+          } via ${
             withdraw.withdrawMethod.type
           } has been ${status.toLowerCase()}. ${
             reason ? `Reason: ${reason}` : "It will take 3-7 days to process."
@@ -300,10 +330,13 @@ router.put(
         // Continue despite email failure
       }
 
+      await session.commitTransaction();
       console.info("update-withdraw-request: Withdrawal updated", {
         withdrawId: withdraw._id,
         shopId: shop._id,
         status,
+        availableBalance: shop.availableBalance,
+        pendingBalance: shop.pendingBalance,
       });
 
       res.status(200).json({
@@ -311,11 +344,14 @@ router.put(
         withdraw,
       });
     } catch (error) {
+      await session.abortTransaction();
       console.error("update-withdraw-request error:", {
         message: error.message,
         withdrawId: req.params.id,
       });
       return next(new ErrorHandler(error.message, 400));
+    } finally {
+      session.endSession();
     }
   })
 );

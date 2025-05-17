@@ -24,13 +24,16 @@ router.post(
   "/create-order",
   isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { items, shippingAddress, totalAmount, paymentInfo } = req.body;
 
       // Validate input
       if (!items || !Array.isArray(items) || items.length === 0) {
-        return next(
-          new ErrorHandler("Items array is required and cannot be empty", 400)
+        throw new ErrorHandler(
+          "Items array is required and cannot be empty",
+          400
         );
       }
       if (
@@ -40,12 +43,10 @@ router.post(
         !shippingAddress.country ||
         !shippingAddress.zipCode
       ) {
-        return next(
-          new ErrorHandler("Complete shipping address is required", 400)
-        );
+        throw new ErrorHandler("Complete shipping address is required", 400);
       }
       if (!totalAmount || totalAmount <= 0) {
-        return next(new ErrorHandler("Valid total amount is required", 400));
+        throw new ErrorHandler("Valid total amount is required", 400);
       }
 
       // Group items by shopId
@@ -62,43 +63,35 @@ router.post(
           !item.price ||
           item.price < 0
         ) {
-          return next(
-            new ErrorHandler(
-              "Invalid item: itemId, shopId, quantity, name, and price are required",
-              400
-            )
+          throw new ErrorHandler(
+            "Invalid item: itemId, shopId, quantity, name, and price are required",
+            400
           );
         }
 
         // Validate ObjectIds
         if (!mongoose.Types.ObjectId.isValid(item.itemId)) {
-          return next(
-            new ErrorHandler(`Invalid product ID: ${item.itemId}`, 400)
-          );
+          throw new ErrorHandler(`Invalid product ID: ${item.itemId}`, 400);
         }
         if (!mongoose.Types.ObjectId.isValid(item.shopId)) {
-          return next(new ErrorHandler(`Invalid shop ID: ${item.shopId}`, 400));
+          throw new ErrorHandler(`Invalid shop ID: ${item.shopId}`, 400);
         }
 
         // Fetch product and validate
-        const product = await Product.findById(item.itemId).select(
-          "price stock shop name status"
-        );
+        const product = await Product.findById(item.itemId)
+          .select("price stock shop name status")
+          .session(session);
         if (!product) {
-          return next(
-            new ErrorHandler(`Product not found: ${item.itemId}`, 404)
-          );
+          throw new ErrorHandler(`Product not found: ${item.itemId}`, 404);
         }
         if (!product.shop) {
           console.error("create-order: Product missing shop reference", {
             itemId: item.itemId,
             productName: product.name,
           });
-          return next(
-            new ErrorHandler(
-              `Product ${item.itemId} has no associated shop`,
-              400
-            )
+          throw new ErrorHandler(
+            `Product ${item.itemId} has no associated shop`,
+            400
           );
         }
 
@@ -116,26 +109,20 @@ router.post(
         });
 
         if (productShopId !== requestShopId) {
-          return next(
-            new ErrorHandler(
-              `Product ${item.itemId} does not belong to shop ${item.shopId}`,
-              400
-            )
+          throw new ErrorHandler(
+            `Product ${item.itemId} does not belong to shop ${item.shopId}`,
+            400
           );
         }
 
         if (product.stock < item.quantity) {
-          return next(
-            new ErrorHandler(
-              `Insufficient stock for product: ${product.name}`,
-              400
-            )
+          throw new ErrorHandler(
+            `Insufficient stock for product: ${product.name}`,
+            400
           );
         }
         if (product.status !== "publish" && product.status !== "active") {
-          return next(
-            new ErrorHandler(`Product is not active: ${product.name}`, 400)
-          );
+          throw new ErrorHandler(`Product is not active: ${product.name}`, 400);
         }
 
         const shopId = item.shopId;
@@ -156,18 +143,18 @@ router.post(
 
       // Validate totalAmount
       if (Math.abs(calculatedTotal - totalAmount) > 0.01) {
-        return next(new ErrorHandler("Total amount does not match items", 400));
+        throw new ErrorHandler("Total amount does not match items", 400);
       }
 
       // Create orders per shop
       const orders = [];
       for (const [shopId, orderItems] of shopItemsMap) {
-        const shop = await Shop.findById(shopId);
+        const shop = await Shop.findById(shopId).session(session);
         if (!shop) {
-          return next(new ErrorHandler(`Shop not found: ${shopId}`, 404));
+          throw new ErrorHandler(`Shop not found: ${shopId}`, 404);
         }
         if (!shop.isVerified) {
-          return next(new ErrorHandler(`Shop is not verified: ${shopId}`, 403));
+          throw new ErrorHandler(`Shop is not verified: ${shopId}`, 403);
         }
 
         const orderTotal = orderItems.reduce(
@@ -175,7 +162,7 @@ router.post(
           0
         );
 
-        const order = await Order.create({
+        const order = new Order({
           shop: shopId,
           customer: req.user._id,
           items: orderItems,
@@ -191,6 +178,8 @@ router.post(
             },
           ],
         });
+
+        await order.save({ session });
 
         // Send email notification to seller
         try {
@@ -234,11 +223,13 @@ router.post(
         });
       }
 
+      await session.commitTransaction();
       res.status(201).json({
         success: true,
         orders,
       });
     } catch (error) {
+      await session.abortTransaction();
       console.error("create-order error:", {
         message: error.message,
         stack: error.stack,
@@ -246,6 +237,8 @@ router.post(
         userId: req.user?._id,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
+    } finally {
+      session.endSession();
     }
   })
 );
@@ -407,69 +400,69 @@ router.put(
   "/update-order-status/:id",
   isSeller,
   catchAsyncErrors(async (req, res, next) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { status, reason } = req.body;
-      const order = await Order.findById(req.params.id).populate(
-        "shop customer"
-      );
+      const order = await Order.findById(req.params.id)
+        .populate("shop customer")
+        .session(session);
 
       if (!order) {
-        return next(new ErrorHandler("Order not found", 404));
+        throw new ErrorHandler("Order not found", 404);
       }
 
       // Verify seller owns the shop for this order
       if (order.shop._id.toString() !== req.seller._id.toString()) {
-        return next(
-          new ErrorHandler(
-            "Unauthorized: Order does not belong to your shop",
-            403
-          )
+        throw new ErrorHandler(
+          "Unauthorized: Order does not belong to your shop",
+          403
         );
       }
 
       // Validate status transition
       if (!status || !STATUS_TRANSITIONS[order.status].includes(status)) {
-        return next(
-          new ErrorHandler(
-            `Invalid status transition from ${order.status} to ${status}`,
-            400
-          )
+        throw new ErrorHandler(
+          `Invalid status transition from ${order.status} to ${status}`,
+          400
         );
       }
 
       // Update product stock
       if (status === "Shipped") {
         for (const item of order.items) {
-          const product = await Product.findById(item.itemId);
+          const product = await Product.findById(item.itemId).session(session);
           if (!product) {
-            return next(
-              new ErrorHandler(`Product not found: ${item.itemId}`, 404)
-            );
+            throw new ErrorHandler(`Product not found: ${item.itemId}`, 404);
           }
           if (product.stock < item.quantity) {
-            return next(
-              new ErrorHandler(
-                `Insufficient stock for product: ${product.name}`,
-                400
-              )
+            throw new ErrorHandler(
+              `Insufficient stock for product: ${product.name}`,
+              400
             );
           }
           product.stock -= item.quantity;
           product.sold_out = (product.sold_out || 0) + item.quantity;
-          await product.save({ validateBeforeSave: false });
+          await product.save({ session, validateBeforeSave: false });
         }
       }
 
       // Update seller balance
-      if (status === "Delivered") {
+      if (status === "Delivered" && order.paymentStatus === "Paid") {
         const serviceCharge = order.totalAmount * 0.1;
         const sellerAmount = order.totalAmount - serviceCharge;
-        await Shop.findByIdAndUpdate(
-          req.seller._id,
-          { $inc: { pendingBalance: sellerAmount } },
-          { runValidators: false } // Bypass full validation
-        );
-        order.paymentStatus = "Paid";
+        const shop = await Shop.findById(req.seller._id).session(session);
+        if (!shop) {
+          throw new ErrorHandler("Shop not found", 404);
+        }
+        shop.availableBalance = (shop.availableBalance || 0) + sellerAmount;
+        await shop.save({ session, validateBeforeSave: false });
+        console.info("update-order-status: Balance updated", {
+          orderId: order._id,
+          shopId: req.seller._id,
+          sellerAmount,
+          availableBalance: shop.availableBalance,
+        });
       }
 
       // Update status and history
@@ -480,7 +473,11 @@ router.put(
         reason: reason || `Status updated to ${status}`,
       });
 
-      await order.save({ validateBeforeSave: false });
+      if (status === "Delivered") {
+        order.paymentStatus = "Paid";
+      }
+
+      await order.save({ session, validateBeforeSave: false });
 
       // Send email notification to customer
       try {
@@ -517,6 +514,7 @@ router.put(
         });
       }
 
+      await session.commitTransaction();
       console.info("update-order-status: Order updated", {
         orderId: order._id,
         shopId: req.seller._id,
@@ -528,6 +526,7 @@ router.put(
         order,
       });
     } catch (error) {
+      await session.abortTransaction();
       console.error("update-order-status error:", {
         message: error.message,
         stack: error.stack,
@@ -536,6 +535,8 @@ router.put(
         status: req.body.status,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
+    } finally {
+      session.endSession();
     }
   })
 );
@@ -638,57 +639,55 @@ router.put(
   "/order-refund-success/:id",
   isSeller,
   catchAsyncErrors(async (req, res, next) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
       const { status, reason } = req.body;
-      const order = await Order.findById(req.params.id).populate(
-        "shop customer"
-      );
+      const order = await Order.findById(req.params.id)
+        .populate("shop customer")
+        .session(session);
 
       if (!order) {
-        return next(new ErrorHandler("Order not found", 404));
+        throw new ErrorHandler("Order not found", 404);
       }
 
       // Verify seller owns the shop
       if (order.shop._id.toString() !== req.seller._id.toString()) {
-        return next(
-          new ErrorHandler(
-            "Unauthorized: Order does not belong to your shop",
-            403
-          )
+        throw new ErrorHandler(
+          "Unauthorized: Order does not belong to your shop",
+          403
         );
       }
 
       if (status !== "Refunded") {
-        return next(
-          new ErrorHandler("Invalid status for refund approval", 400)
-        );
+        throw new ErrorHandler("Invalid status for refund approval", 400);
       }
 
       if (order.status !== "Refunded") {
-        return next(
-          new ErrorHandler("Order must be in 'Refunded' status", 400)
-        );
+        throw new ErrorHandler("Order must be in 'Refunded' status", 400);
       }
 
       // Restore product stock
       for (const item of order.items) {
-        const product = await Product.findById(item.itemId);
+        const product = await Product.findById(item.itemId).session(session);
         if (!product) {
-          return next(
-            new ErrorHandler(`Product not found: ${item.itemId}`, 404)
-          );
+          throw new ErrorHandler(`Product not found: ${item.itemId}`, 404);
         }
         product.stock += item.quantity;
         product.sold_out = Math.max(0, (product.sold_out || 0) - item.quantity);
-        await product.save({ validateBeforeSave: false });
+        await product.save({ session, validateBeforeSave: false });
       }
 
       // Update balance
-      await Shop.findByIdAndUpdate(
-        req.seller._id,
-        { $inc: { pendingBalance: -order.totalAmount } },
-        { runValidators: false } // Bypass full validation
+      const shop = await Shop.findById(req.seller._id).session(session);
+      if (!shop) {
+        throw new ErrorHandler("Shop not found", 404);
+      }
+      shop.availableBalance = Math.max(
+        0,
+        (shop.availableBalance || 0) - order.totalAmount
       );
+      await shop.save({ session, validateBeforeSave: false });
 
       order.status = status;
       order.statusHistory.push({
@@ -698,7 +697,7 @@ router.put(
       });
       order.paymentStatus = "Refunded";
 
-      await order.save();
+      await order.save({ session });
 
       // Send email notification to customer
       try {
@@ -725,6 +724,7 @@ router.put(
         });
       }
 
+      await session.commitTransaction();
       console.info("order-refund-success: Refund approved", {
         orderId: order._id,
         shopId: req.seller._id,
@@ -736,6 +736,7 @@ router.put(
         message: "Order refund processed successfully",
       });
     } catch (error) {
+      await session.abortTransaction();
       console.error("order-refund-success error:", {
         message: error.message,
         stack: error.stack,
@@ -743,6 +744,8 @@ router.put(
         shopId: req.seller?._id,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
+    } finally {
+      session.endSession();
     }
   })
 );
