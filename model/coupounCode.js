@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const couponCodeSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: [true, "Please enter your coupon code name!"],
+    required: [true, "Please enter your coupon code name"],
     unique: true,
     trim: true,
     uppercase: true,
@@ -32,16 +32,31 @@ const couponCodeSchema = new mongoose.Schema({
   },
   shopId: {
     type: String,
-    required: [true, "Shop ID is required"],
+  },
+  instructorId: {
+    type: String,
   },
   selectedProduct: {
     type: String,
-    default: null,
+  },
+  selectedCourse: {
+    type: String,
   },
   createdAt: {
     type: Date,
     default: Date.now,
   },
+});
+
+// Ensure either shopId or instructorId is provided
+couponCodeSchema.pre("save", function (next) {
+  if (!this.shopId && !this.instructorId) {
+    throw new Error("Either shopId or instructorId is required");
+  }
+  if (this.shopId && this.instructorId) {
+    throw new Error("Cannot provide both shopId and instructorId");
+  }
+  next();
 });
 
 module.exports = mongoose.model("CouponCode", couponCodeSchema);

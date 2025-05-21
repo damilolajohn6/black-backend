@@ -114,8 +114,8 @@ const productSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["draft", "active", "archived", "sold"],
-      default: "draft",
+      enum: ["draft", "active", "publish", "archived", "sold"],
+      default: "active",
     },
     stock: {
       type: Number,

@@ -1,9 +1,12 @@
+// server.js
 require("dotenv").config({ path: "config/.env" });
 const app = require("./app");
 const connectDatabase = require("./db/Database");
-const cloudinary = require("cloudinary");
+const fileUpload = require("express-fileupload");
+const cloudinary = require("cloudinary").v2;
 const { scheduleEventStatusUpdates } = require("./jobs/eventStatusJob");
-const { initializeSocket, getReceiverSocketId } = require("./socket/socket");
+const { initializeSocket } = require("./socket/socket");
+const { setIo } = require("./socketInstance");
 const http = require("http");
 
 // Handle uncaught exceptions
@@ -14,6 +17,9 @@ process.on("uncaughtException", (err) => {
 
 // Connect to MongoDB
 connectDatabase();
+
+app.use(fileUpload({ useTempFiles: false, parseNested: true }));
+
 
 // Configure Cloudinary
 cloudinary.config({
@@ -26,8 +32,8 @@ cloudinary.config({
 const server = http.createServer(app);
 const io = initializeSocket(server);
 
-// Store io in app for use in routes
-app.set("io", io);
+// Store io in socketInstance
+setIo(io);
 
 // Start server
 const PORT = process.env.PORT || 8000;
@@ -44,6 +50,3 @@ process.on("unhandledRejection", (err) => {
     process.exit(1);
   });
 });
-
-// Export io and getReceiverSocketId for use in other modules
-module.exports = { io, getReceiverSocketId };

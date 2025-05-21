@@ -4,7 +4,10 @@ const orderSchema = new mongoose.Schema({
   shop: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Shop",
-    required: true,
+  },
+  instructor: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Instructor",
   },
   customer: {
     type: mongoose.Schema.Types.ObjectId,
@@ -15,7 +18,7 @@ const orderSchema = new mongoose.Schema({
     {
       itemType: {
         type: String,
-        enum: ["Product", "Event"],
+        enum: ["Product", "Event", "Course"],
         required: true,
       },
       itemId: {
@@ -86,10 +89,10 @@ const orderSchema = new mongoose.Schema({
     default: "Pending",
   },
   shippingAddress: {
-    address: { type: String, required: true },
-    city: { type: String, required: true },
-    zipCode: { type: String, required: true },
-    country: { type: String, required: true },
+    address: { type: String },
+    city: { type: String },
+    zipCode: { type: String },
+    country: { type: String },
   },
   createdAt: {
     type: Date,
@@ -100,7 +103,7 @@ const orderSchema = new mongoose.Schema({
   },
 });
 
-// Update statusHistory and updatedAt on status change
+// Update statusHistory and updatedAt
 orderSchema.pre("save", function (next) {
   if (this.isModified("status")) {
     this.statusHistory.push({
@@ -117,8 +120,9 @@ orderSchema.pre("save", function (next) {
   next();
 });
 
-// Indexes for faster queries
+// Indexes
 orderSchema.index({ shop: 1, createdAt: -1 });
+orderSchema.index({ instructor: 1, createdAt: -1 });
 orderSchema.index({ customer: 1 });
 orderSchema.index({ status: 1 });
 

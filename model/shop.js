@@ -32,7 +32,6 @@ const shopSchema = new mongoose.Schema({
   email: {
     type: String,
     required: [true, "Please provide your email"],
-    unique: true,
     lowercase: true,
     validate: [validator.isEmail, "Please provide a valid email"],
   },
@@ -87,7 +86,7 @@ const shopSchema = new mongoose.Schema({
     details: {
       type: Object,
     },
-  }, // Optional to avoid validation issues; run migration to fix existing invalid values
+  },
   availableBalance: {
     type: Number,
     default: 0,

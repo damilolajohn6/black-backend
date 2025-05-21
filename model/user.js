@@ -1,9 +1,7 @@
-require("dotenv").config();
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const validator = require("validator");
-const crypto = require("crypto");
 
 const userSchema = new mongoose.Schema({
   fullname: {
@@ -27,13 +25,15 @@ const userSchema = new mongoose.Schema({
   },
   username: {
     type: String,
-    required: [true, "Please enter your name!"],
+    required: [true, "Please enter your username"],
+    unique: true,
+    trim: true,
   },
   email: {
     type: String,
     required: [true, "Please provide your email"],
-    unique: true,
     lowercase: true,
+    unique: true,
     validate: [validator.isEmail, "Please provide a valid email"],
   },
   password: {
@@ -45,26 +45,14 @@ const userSchema = new mongoose.Schema({
   phoneNumber: {
     countryCode: {
       type: String,
-      required: false,
       match: [/^\+\d{1,3}$/, "Invalid country code (e.g., +1, +44)"],
     },
     number: {
       type: String,
-      required: false,
       match: [/^\d{7,15}$/, "Phone number must be 7-15 digits"],
     },
   },
   addresses: [
-    {
-      country: { type: String },
-      city: { type: String },
-      address1: { type: String },
-      address2: { type: String },
-      zipCode: { type: Number },
-      addressType: { type: String },
-    },
-  ],
-  shippingAddress: [
     {
       country: { type: String },
       city: { type: String },
@@ -85,9 +73,15 @@ const userSchema = new mongoose.Schema({
     isServiceProviderApproved: { type: Boolean, default: false },
   },
   avatar: {
-    public_id: { type: String, required: false },
-    url: { type: String, required: false },
+    public_id: { type: String },
+    url: { type: String },
   },
+  wishlist: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Course",
+    },
+  ],
   verificationOtp: { type: String },
   verificationOtpExpiry: { type: Number },
   isVerified: { type: Boolean, default: false },

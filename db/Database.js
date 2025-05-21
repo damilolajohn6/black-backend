@@ -4,8 +4,6 @@ const connectDatabase = () => {
   mongoose
     .connect(process.env.DB_URL, {
       dbName: "blackandsellbackend22",
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
     })
     .then((data) => {
       console.log(`mongod connected with server: ${data.connection.host}`);

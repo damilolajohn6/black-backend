@@ -9,14 +9,12 @@ const app = express();
 
 // CORS middleware
 app.use(
-  cors(
-    {
-    origin: ["http://localhost:3000", "https://blacksell.vercel.app"],
+  cors({
+    origin: ["http://localhost:3000", "https://example.com"],
     credentials: true,
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
     allowedHeaders: ["Content-Type", "Authorization"],
-  }
-)
+  })
 );
 
 // Express middleware
@@ -36,29 +34,34 @@ const order = require("./controller/order");
 const conversation = require("./controller/conversation");
 const message = require("./controller/message");
 const withdraw = require("./controller/withdraw");
+const adminRoutes = require("./controller/admin");
+const instructor = require("./controller/instructor");
+const enrollment = require("./controller/enrollment");
+const review = require("./controller/review");
+const course = require("./controller/course");
+const courseReviews = require("./controller/reviews");
+const analytics = require("./controller/analytics");
+const instructorWithdrawal = require("./controller/instructorWithdrawal");
 
 app.use("/api/v2/user", user);
-console.log("Registered routes: /api/v2/user");
 app.use("/api/v2/social", social);
-console.log("Registered routes: /api/v2/social");
 app.use("/api/v2/conversation", conversation);
-console.log("Registered routes: /api/v2/conversation");
 app.use("/api/v2/message", message);
-console.log("Registered routes: /api/v2/message");
 app.use("/api/v2/order", order);
-console.log("Registered routes: /api/v2/order");
 app.use("/api/v2/shop", shop);
-console.log("Registered routes: /api/v2/shop");
 app.use("/api/v2/product", product);
-console.log("Registered routes: /api/v2/product");
 app.use("/api/v2/event", event);
-console.log("Registered routes: /api/v2/event");
 app.use("/api/v2/coupon", coupon);
-console.log("Registered routes: /api/v2/coupon");
 app.use("/api/v2/payment", payment);
-console.log("Registered routes: /api/v2/payment");
 app.use("/api/v2/withdraw", withdraw);
-console.log("Registered routes: /api/v2/withdraw");
+app.use("/api/v2/admin", adminRoutes);
+app.use("/api/v2/instructor", instructor);
+app.use("/api/v2/enrollment", enrollment);
+app.use("/api/v2/review", review);
+app.use("/api/v2/course", course);
+app.use("/api/v2/course-reviews", courseReviews);
+app.use("/api/v2/analytics", analytics);
+app.use("/api/v2/instructor-withdraw", instructorWithdrawal);
 
 // Test route
 app.use("/test", (req, res) => {

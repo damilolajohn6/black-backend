@@ -10,7 +10,7 @@ const Post = require("../model/post");
 const Message = require("../model/message");
 const Conversation = require("../model/conversation");
 const Follower = require("../model/follower");
-const { io, getReceiverSocketId } = require("../server"); // Import from server.js
+const { getIo, getReceiverSocketId } = require("../socketInstance"); 
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -487,6 +487,7 @@ router.post(
         .populate("senderId", "name avatar")
         .populate("receiverId", "name avatar");
 
+      const io = getIo(); // Get io instance
       const receiverSocketId = getReceiverSocketId(receiverId);
       const senderSocketId = getReceiverSocketId(senderId);
       if (receiverSocketId) {

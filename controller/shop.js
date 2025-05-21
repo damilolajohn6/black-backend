@@ -2,11 +2,10 @@ require("dotenv").config();
 const express = require("express");
 const { body } = require("express-validator");
 const router = express.Router();
-const jwt = require("jsonwebtoken");
 const sendMail = require("../utils/sendMail");
 const Shop = require("../model/shop");
 const { isAuthenticated, isSeller, isAdmin } = require("../middleware/auth");
-const cloudinary = require("cloudinary");
+const cloudinary = require("cloudinary").v2;
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 const sendShopToken = require("../utils/shopToken");
@@ -522,6 +521,36 @@ router.delete(
       res.status(201).json({
         success: true,
         seller,
+      });
+    } catch (error) {
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// shop.js
+router.put(
+  "/admin-fix-shop-profile/:id",
+  isAuthenticated,
+  isAdmin("Admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { firstName, lastName } = req.body;
+      if (!firstName || !lastName) {
+        return next(
+          new ErrorHandler("First and last name are required", 400)
+        );
+      }
+      const shop = await Shop.findById(req.params.id);
+      if (!shop) {
+        return next(new ErrorHandler("Shop not found", 404));
+      }
+      shop.fullname = { firstName, lastName };
+      await shop.save();
+      res.status(200).json({
+        success: true,
+        message: "Shop profile updated",
+        shop,
       });
     } catch (error) {
       return next(new ErrorHandler(error.message, 500));

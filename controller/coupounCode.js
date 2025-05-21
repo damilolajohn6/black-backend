@@ -1,211 +1,266 @@
 const express = require("express");
-const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const Shop = require("../model/shop");
-const ErrorHandler = require("../utils/ErrorHandler");
-const { isSeller } = require("../middleware/auth");
-const CouponCode = require("../model/coupounCode");
 const router = express.Router();
+const CouponCode = require("../model/coupounCode");
+const Course = require("../model/course");
+const sendMail = require("../utils/sendMail");
+const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const ErrorHandler = require("../utils/ErrorHandler");
+const { isAuthenticated, isInstructor, isSeller } = require("../middleware/auth");
 
-// Create coupon code
+// Create coupon
 router.post(
-  "/create-coupon-code",
+  "/create-coupon",
+  isInstructor,
   isSeller,
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { name, value, minAmount, maxAmount, selectedProduct } = req.body;
+      const { name, value, minAmount, maxAmount, selectedCourse } = req.body;
 
-      // Validate required fields
       if (!name || !value) {
-        return next(
-          new ErrorHandler("Coupon name and value are required", 400)
-        );
+        return next(new ErrorHandler("Coupon name and value are required", 400));
       }
 
-      // Ensure the shopId matches the seller's shop
-      if (req.body.shopId !== req.seller.shopId) {
-        return next(new ErrorHandler("Unauthorized: Invalid shop ID", 403));
+      if (selectedCourse) {
+        const course = await Course.findById(selectedCourse);
+        if (!course) {
+          return next(new ErrorHandler("Course not found", 404));
+        }
+        if (course.instructor.toString() !== req.instructor._id.toString()) {
+          return next(new ErrorHandler("Unauthorized: Not your course", 403));
+        }
       }
 
-      // Check if coupon code already exists
-      const existingCoupon = await CouponCode.findOne({ name });
-      if (existingCoupon) {
-        return next(new ErrorHandler("Coupon code already exists", 400));
-      }
-
-      // Create coupon
-      const couponCode = await CouponCode.create({
+      const coupon = await CouponCode.create({
         name,
         value,
         minAmount,
         maxAmount,
-        shopId: req.seller.shopId,
-        selectedProduct,
+        instructorId: req.instructor._id.toString(),
+        selectedCourse,
       });
 
-      console.info("Coupon created:", {
-        couponId: couponCode._id,
-        name: couponCode.name,
-        shopId: req.seller._id,
+      console.info("create-coupon: Coupon created", {
+        couponId: coupon._id,
+        name,
+        instructorId: req.instructor._id,
       });
+
+      try {
+        await sendMail({
+          email: req.instructor.email,
+          subject: "New Coupon Created",
+          message: `Hello ${req.instructor.fullname.firstName}, your coupon "${name}" has been created successfully.`,
+        });
+      } catch (error) {
+        console.error("EMAIL SEND ERROR:", error);
+      }
 
       res.status(201).json({
         success: true,
-        couponCode,
+        coupon,
       });
     } catch (error) {
-      console.error("CREATE COUPON ERROR:", error.message, error.stack);
+      console.error("CREATE COUPON ERROR:", error);
       return next(new ErrorHandler(error.message, 400));
     }
   })
 );
 
-// Get all coupons of a shop
-router.get(
-  "/get-coupon/:id",
-  isSeller,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      if (req.params.id !== req.seller._id.toString()) {
-        return next(
-          new ErrorHandler("Cannot access another shop's coupons", 403)
-        );
-      }
-      const couponCodes = await CouponCode.find({ shopId: req.seller._id });
-      console.info("Coupons fetched:", {
-        shopId: req.seller._id,
-        count: couponCodes.length,
-      });
-      res.status(200).json({
-        success: true,
-        couponCodes,
-      });
-    } catch (error) {
-      console.error("Get coupons error:", error.message, error);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
-// Update coupon code
+// Update coupon
 router.put(
-  "/update-coupon/:id",
+  "/update-coupon/:couponId",
+  isInstructor,
   isSeller,
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { name, value, minAmount, maxAmount, selectedProduct } = req.body;
-      const couponId = req.params.id;
+      const { couponId } = req.params;
+      const { name, value, minAmount, maxAmount, selectedCourse } = req.body;
 
-      // Find the coupon and verify it belongs to the seller's shop
       const coupon = await CouponCode.findById(couponId);
       if (!coupon) {
-        return next(new ErrorHandler("Coupon code not found", 404));
+        return next(new ErrorHandler("Coupon not found", 404));
       }
-      if (coupon.shopId !== req.seller.shopId) {
-        return next(
-          new ErrorHandler(
-            "Unauthorized: Coupon does not belong to your shop",
-            403
-          )
-        );
+      if (coupon.instructorId !== req.instructor._id.toString()) {
+        return next(new ErrorHandler("Unauthorized: Not your coupon", 403));
       }
 
-      // If updating the name, check for conflicts
-      if (name && name !== coupon.name) {
-        const existingCoupon = await CouponCode.findOne({ name });
-        if (existingCoupon) {
-          return next(new ErrorHandler("Coupon code name already exists", 400));
+      if (selectedCourse) {
+        const course = await Course.findById(selectedCourse);
+        if (!course) {
+          return next(new ErrorHandler("Course not found", 404));
+        }
+        if (course.instructor.toString() !== req.instructor._id.toString()) {
+          return next(new ErrorHandler("Unauthorized: Not your course", 403));
         }
       }
 
-      // Update fields
-      coupon.name = name || coupon.name;
-      coupon.value = value !== undefined ? value : coupon.value;
-      coupon.minAmount = minAmount !== undefined ? minAmount : coupon.minAmount;
-      coupon.maxAmount = maxAmount !== undefined ? maxAmount : coupon.maxAmount;
-      coupon.selectedProduct =
-        selectedProduct !== undefined
-          ? selectedProduct
-          : coupon.selectedProduct;
+      if (name) coupon.name = name;
+      if (value) coupon.value = value;
+      if (minAmount !== undefined) coupon.minAmount = minAmount;
+      if (maxAmount !== undefined) coupon.maxAmount = maxAmount;
+      if (selectedCourse !== undefined) coupon.selectedCourse = selectedCourse;
 
       await coupon.save();
 
-      console.info("Coupon updated", {
+      console.info("update-coupon: Coupon updated", {
         couponId,
-        shopId: req.seller.shopId,
-        name: coupon.name,
+        instructorId: req.instructor._id,
       });
 
       res.status(200).json({
         success: true,
-        couponCode: coupon,
+        coupon,
       });
     } catch (error) {
-      console.error("UPDATE COUPON ERROR:", error.message, error.stack);
+      console.error("UPDATE COUPON ERROR:", error);
       return next(new ErrorHandler(error.message, 400));
     }
   })
 );
 
-// Delete coupon code
+// Delete coupon
 router.delete(
-  "/delete-coupon/:id",
+  "/delete-coupon/:couponId",
+  isInstructor,
   isSeller,
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const couponId = req.params.id;
+      const { couponId } = req.params;
 
-      // Find the coupon and verify it belongs to the seller's shop
       const coupon = await CouponCode.findById(couponId);
       if (!coupon) {
-        return next(new ErrorHandler("Coupon code not found", 404));
+        return next(new ErrorHandler("Coupon not found", 404));
       }
-      if (coupon.shopId !== req.seller.shopId) {
+      if (coupon.instructorId !== req.instructor._id.toString()) {
+        return next(new ErrorHandler("Unauthorized: Not your coupon", 403));
+      }
+
+      await coupon.deleteOne();
+
+      console.info("delete-coupon: Coupon deleted", {
+        couponId,
+        instructorId: req.instructor._id,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Coupon deleted successfully",
+      });
+    } catch (error) {
+      console.error("DELETE COUPON ERROR:", error);
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get instructor coupons
+router.get(
+  "/get-coupons/:instructorId",
+  isInstructor,
+  isSeller,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { instructorId } = req.params;
+      const { page = 1, limit = 10 } = req.query;
+
+      if (req.instructor._id.toString() !== instructorId) {
+        return next(
+          new ErrorHandler("Unauthorized to access these coupons", 403)
+        );
+      }
+
+      const coupons = await CouponCode.find({ instructorId })
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(Number(limit));
+
+      const total = await CouponCode.countDocuments({ instructorId });
+
+      console.info("get-coupons: Coupons retrieved", {
+        instructorId,
+        couponCount: coupons.length,
+        page,
+        limit,
+      });
+
+      res.status(200).json({
+        success: true,
+        coupons,
+        total,
+        page: Number(page),
+        pages: Math.ceil(total / limit),
+      });
+    } catch (error) {
+      console.error("GET COUPONS ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Apply coupon
+router.post(
+  "/apply-coupon",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { couponCode, courseId } = req.body;
+
+      if (!couponCode || !courseId) {
+        return next(new ErrorHandler("Coupon code and course ID are required", 400));
+      }
+
+      const course = await Course.findById(courseId);
+      if (!course || course.status !== "Published") {
+        return next(new ErrorHandler("Course not found or not published", 404));
+      }
+
+      const coupon = await CouponCode.findOne({ name: couponCode.toUpperCase() });
+      if (!coupon) {
+        return next(new ErrorHandler("Invalid coupon code", 400));
+      }
+
+      if (coupon.instructorId && coupon.instructorId !== course.instructor.toString()) {
+        return next(new ErrorHandler("Coupon not valid for this course", 400));
+      }
+
+      if (coupon.selectedCourse && coupon.selectedCourse !== courseId) {
+        return next(new ErrorHandler("Coupon not valid for this course", 400));
+      }
+
+      const price = course.discountPrice || course.price;
+      if (coupon.minAmount && price < coupon.minAmount) {
         return next(
           new ErrorHandler(
-            "Unauthorized: Coupon does not belong to your shop",
-            403
+            `Course price must be at least ${coupon.minAmount} to use this coupon`,
+            400
+          )
+        );
+      }
+      if (coupon.maxAmount && price > coupon.maxAmount) {
+        return next(
+          new ErrorHandler(
+            `Course price must not exceed ${coupon.maxAmount} to use this coupon`,
+            400
           )
         );
       }
 
-      await CouponCode.findByIdAndDelete(couponId);
+      const discountedPrice = price * (1 - coupon.value / 100);
 
-      console.info("Coupon deleted", {
-        couponId,
-        shopId: req.seller.shopId,
-        name: coupon.name,
-      });
-
-      res.status(200).json({
-        success: true,
-        message: "Coupon code deleted successfully",
-      });
-    } catch (error) {
-      console.error("DELETE COUPON ERROR:", error.message, error.stack);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
-// Get coupon code by name (for customers)
-router.get(
-  "/get-coupon-value/:name",
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const couponCode = await CouponCode.findOne({ name: req.params.name });
-
-      if (!couponCode) {
-        return next(new ErrorHandler("Coupon code not found", 404));
-      }
-
-      console.info("Coupon fetched by name", { name: req.params.name });
-
-      res.status(200).json({
-        success: true,
+      console.info("apply-coupon: Coupon applied", {
         couponCode,
+        courseId,
+        userId: req.user._id,
+        discountedPrice,
+      });
+
+      res.status(200).json({
+        success: true,
+        discountedPrice,
+        coupon,
       });
     } catch (error) {
-      console.error("GET COUPON VALUE ERROR:", error.message, error.stack);
+      console.error("APPLY COUPON ERROR:", error);
       return next(new ErrorHandler(error.message, 400));
     }
   })
