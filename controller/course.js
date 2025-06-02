@@ -1,9 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const Course = require("../model/course");
-const Quiz = require("../model/quiz");
 const Discussion = require("../model/discussion");
-const Question = require("../model/question");
 const User = require("../model/user");
 const Enrollment = require("../model/enrollment");
 const sendMail = require("../utils/sendMail");
@@ -47,18 +45,17 @@ router.post(
       } = req.body;
 
       // Validate required fields
-      if (!title) {
+      if (!title || title.trim() === "") {
         return next(new ErrorHandler("Course title is required", 400));
       }
       if (!description || description.trim() === "") {
-        return next(
-          new ErrorHandler(
-            "Course description is required and cannot be empty",
-            400
-          )
-        );
+        return next(new ErrorHandler("Course description is required", 400));
       }
-      if (!learningObjectives || !learningObjectives.length) {
+      if (
+        !learningObjectives ||
+        !Array.isArray(learningObjectives) ||
+        learningObjectives.length === 0
+      ) {
         return next(
           new ErrorHandler("At least one learning objective is required", 400)
         );
@@ -66,11 +63,20 @@ router.post(
       if (!price && price !== 0) {
         return next(new ErrorHandler("Course price is required", 400));
       }
-      if (!categories || !categories.length) {
+      if (
+        !categories ||
+        !Array.isArray(categories) ||
+        categories.length === 0
+      ) {
         return next(new ErrorHandler("At least one category is required", 400));
       }
       if (!thumbnail?.url) {
-        return next(new ErrorHandler("Course thumbnail is required", 400));
+        return next(new ErrorHandler("Course thumbnail URL is required", 400));
+      }
+      if (!content || !Array.isArray(content) || content.length === 0) {
+        return next(
+          new ErrorHandler("At least one content section is required", 400)
+        );
       }
 
       const course = {
@@ -80,42 +86,75 @@ router.post(
         prerequisites: prerequisites || [],
         targetAudience: targetAudience || [],
         price,
-        discountPrice,
+        discountPrice: discountPrice || 0,
         categories,
         tags: tags || [],
         level: level || "All Levels",
         language: language || "English",
         instructor: req.instructor._id,
-        content: content || [],
+        content: content.map((section) => ({
+          sectionTitle: section.sectionTitle || "Untitled Section",
+          lectures:
+            section.lectures?.map((lecture) => ({
+              title: lecture.title || "Untitled Lecture",
+              description: lecture.description || "",
+              video: lecture.videoUrl
+                ? { url: lecture.videoUrl, public_id: "", duration: 0 }
+                : null,
+              resources: [],
+              comments: [],
+            })) || [],
+        })),
       };
 
-      // Upload thumbnail
-      const thumbnailResult = await cloudinary.uploader.upload(thumbnail.url, {
-        folder: "course_thumbnails",
-        width: 720,
-        crop: "scale",
-        resource_type: "image",
-      });
-      course.thumbnail = {
-        public_id: thumbnailResult.public_id,
-        url: thumbnailResult.secure_url,
-      };
+      // Handle thumbnail
+      if (thumbnail.url.includes("cloudinary.com")) {
+        course.thumbnail = { url: thumbnail.url };
+      } else {
+        try {
+          const thumbnailResult = await cloudinary.uploader.upload(
+            thumbnail.url,
+            {
+              folder: "course_thumbnails",
+              width: 720,
+              crop: "scale",
+              resource_type: "image",
+            }
+          );
+          course.thumbnail = {
+            public_id: thumbnailResult.public_id,
+            url: thumbnailResult.secure_url,
+          };
+        } catch (uploadError) {
+          console.error("Thumbnail upload error:", uploadError.message);
+          return next(new ErrorHandler("Failed to upload thumbnail", 400));
+        }
+      }
 
-      // Upload preview video if provided
+      // Handle preview video
       if (previewVideo?.url) {
-        const previewResult = await cloudinary.uploader.upload(
-          previewVideo.url,
-          {
-            folder: "course_preview_videos",
-            resource_type: "video",
-            transformation: [{ quality: "auto", fetch_format: "mp4" }],
+        try {
+          if (previewVideo.url.includes("cloudinary.com")) {
+            course.previewVideo = { url: previewVideo.url };
+          } else {
+            const previewResult = await cloudinary.uploader.upload(
+              previewVideo.url,
+              {
+                folder: "course_preview_videos",
+                resource_type: "video",
+                transformation: [{ quality: "auto", fetch_format: "mp4" }],
+              }
+            );
+            course.previewVideo = {
+              public_id: previewResult.public_id,
+              url: previewResult.secure_url,
+              duration: previewResult.duration || 0,
+            };
           }
-        );
-        course.previewVideo = {
-          public_id: previewResult.public_id,
-          url: previewResult.secure_url,
-          duration: previewResult.duration || 0,
-        };
+        } catch (uploadError) {
+          console.error("Preview video upload error:", uploadError.message);
+          return next(new ErrorHandler("Failed to upload preview video", 400));
+        }
       }
 
       const newCourse = await Course.create(course);
@@ -131,8 +170,8 @@ router.post(
           subject: "New Course Created",
           message: `Hello ${req.instructor.fullname.firstName}, your course "${title}" has been created successfully and is in Draft status. Add content and submit for review to publish.`,
         });
-      } catch (error) {
-        console.error("EMAIL SEND ERROR:", error);
+      } catch (emailError) {
+        console.error("EMAIL SEND ERROR:", emailError.message);
       }
 
       res.status(201).json({
@@ -140,7 +179,7 @@ router.post(
         course: newCourse,
       });
     } catch (error) {
-      console.error("CREATE COURSE ERROR:", error);
+      console.error("CREATE COURSE ERROR:", error.message, error.stack);
       return next(new ErrorHandler(error.message, 400));
     }
   })
@@ -485,111 +524,7 @@ router.get(
   })
 );
 
-// Existing routes (unchanged for brevity, but included for completeness)
-router.put(
-  "/update-course/:id",
-  isInstructor,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const course = await Course.findById(req.params.id);
-      if (!course) {
-        return next(new ErrorHandler("Course not found", 404));
-      }
-      if (course.instructor.toString() !== req.instructor._id.toString()) {
-        return next(new ErrorHandler("Unauthorized: Not your course", 403));
-      }
-
-      const {
-        title,
-        description,
-        learningObjectives,
-        prerequisites,
-        targetAudience,
-        price,
-        discountPrice,
-        categories,
-        tags,
-        level,
-        language,
-        thumbnail,
-        previewVideo,
-        content,
-        status,
-      } = req.body;
-
-      if (title) course.title = title;
-      if (description) course.description = description;
-      if (learningObjectives) course.learningObjectives = learningObjectives;
-      if (prerequisites) course.prerequisites = prerequisites;
-      if (targetAudience) course.targetAudience = targetAudience;
-      if (price !== undefined) course.price = price;
-      if (discountPrice !== undefined) course.discountPrice = discountPrice;
-      if (categories) course.categories = categories;
-      if (tags) course.tags = tags;
-      if (level) course.level = level;
-      if (language) course.language = language;
-      if (content) course.content = content;
-      if (status) course.status = status;
-
-      if (thumbnail?.url) {
-        if (course.thumbnail.public_id) {
-          await cloudinary.uploader.destroy(course.thumbnail.public_id, {
-            resource_type: "image",
-          });
-        }
-        const thumbnailResult = await cloudinary.uploader.upload(
-          thumbnail.url,
-          {
-            folder: "course_thumbnails",
-            width: 720,
-            crop: "scale",
-            resource_type: "image",
-          }
-        );
-        course.thumbnail = {
-          public_id: thumbnailResult.public_id,
-          url: thumbnailResult.secure_url,
-        };
-      }
-
-      if (previewVideo?.url) {
-        if (course.previewVideo?.public_id) {
-          await cloudinary.uploader.destroy(course.previewVideo.public_id, {
-            resource_type: "video",
-          });
-        }
-        const previewResult = await cloudinary.uploader.upload(
-          previewVideo.url,
-          {
-            folder: "course_preview_videos",
-            resource_type: "video",
-            transformation: [{ quality: "auto", fetch_format: "mp4" }],
-          }
-        );
-        course.previewVideo = {
-          public_id: previewResult.public_id,
-          url: previewResult.secure_url,
-          duration: previewResult.duration || 0,
-        };
-      }
-
-      await course.save();
-      console.info("update-course: Course updated", {
-        courseId: course._id,
-        instructorId: req.instructor._id,
-      });
-
-      res.status(200).json({
-        success: true,
-        course,
-      });
-    } catch (error) {
-      console.error("UPDATE COURSE ERROR:", error);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
+// Delete course
 router.delete(
   "/delete-course/:id",
   isInstructor,
@@ -621,6 +556,7 @@ router.delete(
   })
 );
 
+// Get instructor courses
 router.get(
   "/get-instructor-courses",
   isInstructor,
@@ -659,6 +595,7 @@ router.get(
   })
 );
 
+// Get course by ID
 router.get(
   "/get-course/:id",
   catchAsyncErrors(async (req, res, next) => {
@@ -690,6 +627,7 @@ router.get(
   })
 );
 
+// Search courses
 router.get(
   "/search-courses",
   catchAsyncErrors(async (req, res, next) => {
@@ -760,146 +698,7 @@ router.get(
   })
 );
 
-router.post(
-  "/create-quiz/:courseId",
-  isInstructor,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const { courseId } = req.params;
-      const {
-        title,
-        description,
-        sectionId,
-        timeLimit,
-        passingScore,
-        questions,
-      } = req.body;
-
-      if (!title || !sectionId || !questions || !Array.isArray(questions)) {
-        return next(new ErrorHandler("Required fields are missing", 400));
-      }
-
-      const course = await Course.findById(courseId);
-      if (!course) {
-        return next(new ErrorHandler("Course not found", 404));
-      }
-      if (course.instructor.toString() !== req.instructor._id.toString()) {
-        return next(new ErrorHandler("Unauthorized: Not your course", 403));
-      }
-
-      const sectionExists = course.content.some(
-        (section) => section._id.toString() === sectionId
-      );
-      if (!sectionExists) {
-        return next(new ErrorHandler("Section not found in course", 404));
-      }
-
-      const quiz = await Quiz.create({
-        course: courseId,
-        sectionId,
-        title,
-        description,
-        timeLimit: timeLimit || 0,
-        passingScore: passingScore || 70,
-        questions,
-      });
-
-      console.info("create-quiz: Quiz created", {
-        quizId: quiz._id,
-        courseId,
-        instructorId: req.instructor._id,
-      });
-
-      res.status(201).json({
-        success: true,
-        quiz,
-      });
-    } catch (error) {
-      console.error("CREATE QUIZ ERROR:", error);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
-router.put(
-  "/update-quiz/:quizId",
-  isInstructor,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const { quizId } = req.params;
-      const { title, description, timeLimit, passingScore, questions } =
-        req.body;
-
-      const quiz = await Quiz.findById(quizId).populate("course");
-      if (!quiz) {
-        return next(new ErrorHandler("Quiz not found", 404));
-      }
-      if (quiz.course.instructor.toString() !== req.instructor._id.toString()) {
-        return next(new ErrorHandler("Unauthorized: Not your course", 403));
-      }
-
-      if (title) quiz.title = title;
-      if (description) quiz.description = description;
-      if (timeLimit !== undefined) quiz.timeLimit = timeLimit;
-      if (passingScore !== undefined) quiz.passingScore = passingScore;
-      if (questions) quiz.questions = questions;
-      quiz.updatedAt = new Date();
-
-      await quiz.save();
-
-      console.info("update-quiz: Quiz updated", {
-        quizId,
-        courseId: quiz.course._id,
-        instructorId: req.instructor._id,
-      });
-
-      res.status(200).json({
-        success: true,
-        quiz,
-      });
-    } catch (error) {
-      console.error("UPDATE QUIZ ERROR:", error);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
-router.delete(
-  "/delete-quiz/:quizId",
-  isInstructor,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const { quizId } = req.params;
-
-      const quiz = await Quiz.findById(quizId).populate("course");
-      if (!quiz) {
-        return next(new ErrorHandler("Quiz not found", 404));
-      }
-      if (quiz.course.instructor.toString() !== req.instructor._id.toString()) {
-        return next(new ErrorHandler("Unauthorized: Not your course", 403));
-      }
-
-      quiz.isActive = false;
-      quiz.updatedAt = new Date();
-      await quiz.save();
-
-      console.info("delete-quiz: Quiz deactivated", {
-        quizId,
-        courseId: quiz.course._id,
-        instructorId: req.instructor._id,
-      });
-
-      res.status(200).json({
-        success: true,
-        message: "Quiz deactivated successfully",
-      });
-    } catch (error) {
-      console.error("DELETE QUIZ ERROR:", error);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
+// Create discussion
 router.post(
   "/create-discussion/:courseId",
   isAuthenticated,
@@ -941,6 +740,7 @@ router.post(
   })
 );
 
+// Reply to discussion
 router.post(
   "/reply-discussion/:discussionId",
   isAuthenticated,
@@ -984,6 +784,7 @@ router.post(
   })
 );
 
+// Get discussions
 router.get(
   "/get-discussions/:courseId",
   catchAsyncErrors(async (req, res, next) => {
@@ -1036,183 +837,7 @@ router.get(
   })
 );
 
-router.post(
-  "/create-question/:courseId",
-  isAuthenticated,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const { courseId } = req.params;
-      const { questionText } = req.body;
-
-      if (!questionText) {
-        return next(new ErrorHandler("Question text is required", 400));
-      }
-
-      const course = await Course.findById(courseId).populate("instructor");
-      if (!course) {
-        return next(new ErrorHandler("Course not found", 404));
-      }
-
-      const enrollment = await Enrollment.findOne({
-        user: req.user._id,
-        course: courseId,
-      });
-      if (!enrollment) {
-        return next(
-          new ErrorHandler("You are not enrolled in this course", 403)
-        );
-      }
-
-      const question = await Question.create({
-        course: courseId,
-        enrollment: enrollment._id,
-        user: req.user._id,
-        questionText,
-      });
-
-      try {
-        if (course.instructor) {
-          await sendMail({
-            email: course.instructor.email,
-            subject: "New Question in Your Course",
-            message: `Hello ${course.instructor.fullname.firstName}, a student has asked a question in your course "${course.title}": "${questionText}".`,
-          });
-        }
-      } catch (error) {
-        console.error("EMAIL SEND ERROR:", error);
-      }
-
-      console.info("create-question: Question created", {
-        questionId: question._id,
-        courseId,
-        userId: req.user._id,
-      });
-
-      res.status(201).json({
-        success: true,
-        question,
-      });
-    } catch (error) {
-      console.error("CREATE QUESTION ERROR:", error);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
-router.post(
-  "/answer-question/:questionId",
-  isInstructor,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const { questionId } = req.params;
-      const { answerText } = req.body;
-
-      if (!answerText) {
-        return next(new ErrorHandler("Answer text is required", 400));
-      }
-
-      const question = await Question.findById(questionId).populate(
-        "course user"
-      );
-      if (!question) {
-        return next(new ErrorHandler("Question not found", 404));
-      }
-      if (
-        question.course.instructor.toString() !== req.instructor._id.toString()
-      ) {
-        return next(
-          new ErrorHandler("Unauthorized to answer this question", 403)
-        );
-      }
-
-      question.answer = {
-        instructor: req.instructor._id,
-        answerText,
-        answeredAt: new Date(),
-      };
-      question.updatedAt = new Date();
-      await question.save();
-
-      try {
-        await sendMail({
-          email: question.user.email,
-          subject: "Your Question Has Been Answered",
-          message: `Hello ${question.user.fullname.firstName}, your question in the course "${question.course.title}" has been answered: "${answerText}".`,
-        });
-      } catch (error) {
-        console.error("EMAIL SEND ERROR:", error);
-      }
-
-      console.info("answer-question: Question answered", {
-        questionId,
-        courseId: question.course._id,
-        instructorId: req.instructor._id,
-      });
-
-      res.status(200).json({
-        success: true,
-        question,
-      });
-    } catch (error) {
-      console.error("ANSWER QUESTION ERROR:", error);
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
-router.get(
-  "/get-questions/:courseId",
-  isAuthenticated,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const { courseId } = req.params;
-      const { page = 1, limit = 10 } = req.query;
-
-      const course = await Course.findById(courseId);
-      if (!course) {
-        return next(new ErrorHandler("Course not found", 404));
-      }
-
-      const isInstructor =
-        req.user.role === "instructor" &&
-        course.instructor.toString() === req.instructor?._id.toString();
-      const isAdmin = req.user.role === "admin";
-
-      const query = { course: courseId };
-      if (!isInstructor && !isAdmin) {
-        query.user = req.user._id;
-      }
-
-      const questions = await Question.find(query)
-        .populate("user", "fullname avatar")
-        .populate("answer.instructor", "fullname")
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(Number(limit));
-
-      const total = await Question.countDocuments(query);
-
-      console.info("get-questions: Questions retrieved", {
-        courseId,
-        questionCount: questions.length,
-        page,
-        limit,
-      });
-
-      res.status(200).json({
-        success: true,
-        questions,
-        total,
-        page: Number(page),
-        pages: Math.ceil(total / limit),
-      });
-    } catch (error) {
-      console.error("GET QUESTIONS ERROR:", error);
-      return next(new ErrorHandler(error.message, 500));
-    }
-  })
-);
-
+// Add to wishlist
 router.post(
   "/add-to-wishlist/:courseId",
   isAuthenticated,
@@ -1249,6 +874,7 @@ router.post(
   })
 );
 
+// Remove from wishlist
 router.delete(
   "/remove-from-wishlist/:courseId",
   isAuthenticated,
@@ -1280,6 +906,7 @@ router.delete(
   })
 );
 
+// Get wishlist
 router.get(
   "/get-wishlist/:userId",
   isAuthenticated,
@@ -1318,6 +945,7 @@ router.get(
   })
 );
 
+// Bulk update course status
 router.put(
   "/bulk-update-course-status",
   isInstructor,
@@ -1369,6 +997,7 @@ router.put(
   })
 );
 
+// Recommended courses
 router.get(
   "/recommended-courses/:userId",
   isAuthenticated,

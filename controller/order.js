@@ -27,7 +27,7 @@ const STATUS_TRANSITIONS = {
   Refunded: [],
 };
 
-
+// Create new order
 router.post(
   "/create-order",
   isAuthenticated,
@@ -152,6 +152,18 @@ router.post(
           });
           calculatedTotal +=
             price * item.quantity + (product.shipping?.cost || 0);
+
+          // Update product stock and sold_out
+          product.stock -= item.quantity;
+          product.sold_out = (product.sold_out || 0) + item.quantity;
+          await product.save({ session, validateBeforeSave: false });
+          console.debug("create-order: Product stock updated", {
+            productId: item.itemId,
+            name: product.name,
+            quantity: item.quantity,
+            newStock: product.stock,
+            newSoldOut: product.sold_out,
+          });
         } else if (item.itemType === "Course") {
           const course = await Course.findById(item.itemId)
             .select("title price discountPrice instructor status")
@@ -296,7 +308,6 @@ router.post(
               shopId,
               error: saveError.message,
             });
-            // Proceed with order creation but log warning
             console.warn(
               "create-order: Proceeding without balance update due to validation error",
               {
@@ -350,7 +361,7 @@ router.post(
         });
       }
 
-      // Instructor orders (unchanged)
+      // Instructor orders
       for (const [instructorId, items] of instructorItemsMap) {
         const instructor = await Instructor.findById(instructorId).session(
           session
@@ -745,29 +756,6 @@ router.put(
           `Invalid status transition from ${order.status} to ${status}`,
           400
         );
-      }
-
-      // Update product stock
-      if (status === "Shipped") {
-        for (const item of order.items) {
-          if (item.itemType === "Product") {
-            const product = await Product.findById(item.itemId).session(
-              session
-            );
-            if (!product) {
-              throw new ErrorHandler(`Product not found: ${item.itemId}`, 404);
-            }
-            if (product.stock < item.quantity) {
-              throw new ErrorHandler(
-                `Insufficient stock for product: ${product.name}`,
-                400
-              );
-            }
-            product.stock -= item.quantity;
-            product.sold_out = (product.sold_out || 0) + item.quantity;
-            await product.save({ session, validateBeforeSave: false });
-          }
-        }
       }
 
       // Update payment status to Paid if not already (for legacy orders)
@@ -1171,6 +1159,13 @@ router.put(
             (product.sold_out || 0) - item.quantity
           );
           await product.save({ session, validateBeforeSave: false });
+          console.debug("order-refund-success: Product stock restored", {
+            productId: item.itemId,
+            name: item.name,
+            quantity: item.quantity,
+            newStock: product.stock,
+            newSoldOut: product.sold_out,
+          });
         } else if (item.itemType === "Course") {
           const enrollment = await Enrollment.findOne({
             user: order.customer._id,
