@@ -3,18 +3,34 @@ const validator = require("validator");
 
 const courseSchema = new mongoose.Schema({
   title: {
-    type: String,
+    type: Map,
+    of: String,
     required: [true, "Please enter the course title"],
-    trim: true,
-    maxlength: [200, "Course title cannot exceed 200 characters"],
-    minlength: [5, "Course title must be at least 5 characters"],
+    validate: {
+      validator: function (map) {
+        return (
+          map.has("en") &&
+          map.get("en").length >= 5 &&
+          map.get("en").length <= 200
+        );
+      },
+      message: "English title is required, must be 5-200 characters",
+    },
   },
   description: {
-    type: String,
+    type: Map,
+    of: String,
     required: [true, "Please enter the course description"],
-    trim: true,
-    maxlength: [5000, "Description cannot exceed 5000 characters"],
-    minlength: [50, "Description must be at least 50 characters"],
+    validate: {
+      validator: function (map) {
+        return (
+          map.has("en") &&
+          map.get("en").length >= 50 &&
+          map.get("en").length <= 5000
+        );
+      },
+      message: "English description is required, must be 50-5000 characters",
+    },
   },
   learningObjectives: {
     type: [String],
@@ -24,7 +40,7 @@ const courseSchema = new mongoose.Schema({
         return arr.length >= 1 && arr.every((item) => item.length <= 200);
       },
       message:
-        "At least one learning objective is required, and each cannot exceed 200 characters",
+        "At least one learning objective is required, each max 200 characters",
     },
   },
   prerequisites: {
@@ -56,16 +72,16 @@ const courseSchema = new mongoose.Schema({
     type: Number,
     required: [true, "Please enter the course price"],
     min: [0, "Price cannot be negative"],
-  },
-  discountPrice: {
-    type: Number,
-    min: [0, "Discount price cannot be negative"],
     validate: {
       validator: function (value) {
-        return value === undefined || value <= this.price;
+        return this.isFree ? value === 0 : value >= 0;
       },
-      message: "Discount price must be less than or equal to regular price",
+      message: "Price must be 0 for free courses",
     },
+  },
+  isFree: {
+    type: Boolean,
+    default: false,
   },
   categories: {
     type: [String],
@@ -74,8 +90,7 @@ const courseSchema = new mongoose.Schema({
       validator: function (arr) {
         return arr.length > 0 && arr.every((item) => item.length <= 50);
       },
-      message:
-        "Categories must be non-empty and items cannot exceed 50 characters",
+      message: "Categories must be non-empty and items max 50 characters",
     },
   },
   tags: {
@@ -98,7 +113,7 @@ const courseSchema = new mongoose.Schema({
     default: "English",
   },
   thumbnail: {
-    public_id: { type: String, required: true },
+    public_id: { type: String },
     url: { type: String, required: true },
   },
   previewVideo: {
@@ -107,6 +122,7 @@ const courseSchema = new mongoose.Schema({
     duration: {
       type: Number,
       min: [0, "Preview video duration cannot be negative"],
+      max: [300, "Preview video cannot exceed 5 minutes"],
     },
   },
   content: [
@@ -126,7 +142,7 @@ const courseSchema = new mongoose.Schema({
             maxlength: [100, "Lecture title cannot exceed 100 characters"],
           },
           video: {
-            public_id: { type: String, required: true },
+            public_id: { type: String },
             url: {
               type: String,
               required: [true, "Video URL is required"],
@@ -192,6 +208,13 @@ const courseSchema = new mongoose.Schema({
   updatedAt: {
     type: Date,
   },
+  draftVersions: [
+    {
+      data: mongoose.Schema.Types.Mixed,
+      savedAt: { type: Date, default: Date.now },
+      version: { type: Number, required: true },
+    },
+  ],
 });
 
 // Update totalDuration and updatedAt
@@ -201,7 +224,7 @@ courseSchema.pre("save", function (next) {
       return (
         total +
         section.lectures.reduce(
-          (sum, lecture) => sum + (lecture.duration || 0),
+          (sum, lecture) => sum + (lecture.video?.duration || 0),
           0
         )
       );
@@ -220,9 +243,8 @@ courseSchema.pre("save", async function (next) {
     if (this.content.some((section) => section.lectures.length === 0)) {
       return next(new Error("All sections must have at least one lecture"));
     }
-    if (this.totalDuration < 1800) {
-      // 30 minutes
-      return next(new Error("Course must be at least 30 minutes long"));
+    if (this.totalDuration < 60) {
+      return next(new Error("Course must be at least 1 minute long"));
     }
     if (!this.thumbnail?.url) {
       return next(new Error("Course must have a thumbnail"));

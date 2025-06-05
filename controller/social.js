@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const router = express.Router();
+const mongoose = require("mongoose");
 const cloudinary = require("cloudinary").v2;
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -10,13 +11,34 @@ const Post = require("../model/post");
 const Message = require("../model/message");
 const Conversation = require("../model/conversation");
 const Follower = require("../model/follower");
-const { getIo, getReceiverSocketId } = require("../socketInstance"); 
+const { getIo, getReceiverSocketId } = require("../socketInstance");
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
+// Helper function to populate comments and replies recursively
+const populateComments = (query) => {
+  return query
+    .populate({
+      path: "user",
+      select: "username avatar",
+    })
+    .populate({
+      path: "comments.user",
+      select: "username avatar",
+    })
+    .populate({
+      path: "comments.replies.user",
+      select: "username avatar",
+    })
+    .populate({
+      path: "comments.replies.replies.user",
+      select: "username avatar",
+    }); // Limit to 3 levels of nesting
+};
 
 // Get all users for social features
 router.get(
@@ -25,7 +47,7 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     try {
       const users = await User.find({ _id: { $ne: req.user.id } }).select(
-        "_id name email avatar"
+        "_id username email avatar"
       );
       const following = await Follower.find({ follower: req.user.id }).select(
         "followed"
@@ -83,7 +105,7 @@ router.post(
 
       res.status(200).json({
         success: true,
-        message: `Now following ${userToFollow.name}`,
+        message: `Now following ${userToFollow.username}`,
       });
     } catch (error) {
       console.error("FOLLOW ERROR:", error);
@@ -123,7 +145,7 @@ router.post(
 
       res.status(200).json({
         success: true,
-        message: `Unfollowed ${userToUnfollow.name}`,
+        message: `Unfollowed ${userToUnfollow.username}`,
       });
     } catch (error) {
       console.error("UNFOLLOW ERROR:", error);
@@ -279,7 +301,6 @@ router.post(
       }
 
       const post = await Post.findById(postId);
-
       if (!post) {
         return next(new ErrorHandler("Post not found", 404));
       }
@@ -287,9 +308,18 @@ router.post(
       post.comments.push({
         user: req.user.id,
         content,
+        likes: [],
+        replies: [],
         createdAt: new Date(),
       });
       await post.save();
+
+      const populatedPost = await Post.findById(postId).populate([
+        { path: "user", select: "username avatar" },
+        { path: "comments.user", select: "username avatar" },
+        { path: "comments.replies.user", select: "username avatar" },
+        { path: "comments.replies.replies.user", select: "username avatar" },
+      ]);
 
       console.info("comment-post: Comment added", {
         userId: req.user.id,
@@ -299,10 +329,272 @@ router.post(
 
       res.status(201).json({
         success: true,
-        comment: post.comments[post.comments.length - 1],
+        post: populatedPost,
       });
     } catch (error) {
       console.error("COMMENT POST ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Like comment
+// social.js
+router.post(
+  "/like-comment/:postId/:commentId",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { postId, commentId } = req.params;
+      if (!mongoose.isValidObjectId(postId) || !mongoose.isValidObjectId(commentId)) {
+        return next(new ErrorHandler("Invalid post or comment ID", 400));
+      }
+
+      const post = await Post.findById(postId);
+      if (!post) {
+        return next(new ErrorHandler("Post not found", 404));
+      }
+
+      let targetComment = null;
+      let parentPath = null;
+
+      const findComment = (comments, path) => {
+        if (!Array.isArray(comments)) {
+          console.error("findComment: Comments is not an array", { comments });
+          return false;
+        }
+        for (let i = 0; i < comments.length; i++) {
+          const comment = comments[i];
+          if (!comment || !comment._id) {
+            console.warn("findComment: Invalid comment object at index", { i, comment });
+            continue;
+          }
+          try {
+            if (comment._id.toString() === commentId) {
+              targetComment = comment;
+              parentPath = path;
+              return true;
+            }
+            if (Array.isArray(comment.replies) && comment.replies.length > 0) {
+              if (findComment(comment.replies, `${path}.replies.${i}`)) {
+                return true;
+              }
+            }
+          } catch (error) {
+            console.error("findComment: Error processing comment", {
+              commentId,
+              comment,
+              error: error.message,
+            });
+            return false;
+          }
+        }
+        return false;
+      };
+
+      if (!findComment(post.comments, "comments")) {
+        return next(new ErrorHandler("Comment not found", 404));
+      }
+
+      if (targetComment.likes.includes(req.user.id)) {
+        return next(new ErrorHandler("Comment already liked", 400));
+      }
+
+      targetComment.likes.push(req.user.id);
+      await post.save();
+
+      const populatedPost = await Post.findById(postId).populate([
+        { path: "user", select: "username avatar" },
+        { path: "comments.user", select: "username avatar" },
+        { path: "comments.replies.user", select: "username avatar" },
+        { path: "comments.replies.replies.user", select: "username avatar" },
+      ]);
+
+      console.info("like-comment: Comment liked", {
+        userId: req.user.id,
+        postId,
+        commentId,
+      });
+
+      res.status(200).json({
+        success: true,
+        post: populatedPost,
+      });
+    } catch (error) {
+      console.error("LIKE COMMENT ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Similarly update /unlike-comment/:postId/:commentId
+router.post(
+  "/unlike-comment/:postId/:commentId",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { postId, commentId } = req.params;
+      if (!mongoose.isValidObjectId(postId) || !mongoose.isValidObjectId(commentId)) {
+        return next(new ErrorHandler("Invalid post or comment ID", 400));
+      }
+
+      const post = await Post.findById(postId);
+      if (!post) {
+        return next(new ErrorHandler("Post not found", 404));
+      }
+
+      let targetComment = null;
+      let parentPath = null;
+
+      const findComment = (comments, path) => {
+        if (!Array.isArray(comments)) {
+          console.error("findComment: Comments is not an array", { comments });
+          return false;
+        }
+        for (let i = 0; i < comments.length; i++) {
+          const comment = comments[i];
+          if (!comment || !comment._id) {
+            console.warn("findComment: Invalid comment object at index", { i, comment });
+            continue;
+          }
+          try {
+            if (comment._id.toString() === commentId) {
+              targetComment = comment;
+              parentPath = path;
+              return true;
+            }
+            if (Array.isArray(comment.replies) && comment.replies.length > 0) {
+              if (findComment(comment.replies, `${path}.replies.${i}`)) {
+                return true;
+              }
+            }
+          } catch (error) {
+            console.error("findComment: Error processing comment", {
+              commentId,
+              comment,
+              error: error.message,
+            });
+            return false;
+          }
+        }
+        return false;
+      };
+
+      if (!findComment(post.comments, "comments")) {
+        return next(new ErrorHandler("Comment not found", 404));
+      }
+
+      if (!targetComment.likes.includes(req.user.id)) {
+        return next(new ErrorHandler("Comment not liked", 400));
+      }
+
+      targetComment.likes = targetComment.likes.filter(
+        (id) => id.toString() !== req.user.id
+      );
+      await post.save();
+
+      const populatedPost = await Post.findById(postId).populate([
+        { path: "user", select: "username avatar" },
+        { path: "comments.user", select: "username avatar" },
+        { path: "comments.replies.user", select: "username avatar" },
+        { path: "comments.replies.replies.user", select: "username avatar" },
+      ]);
+
+      console.info("unlike-comment: Comment unliked", {
+        userId: req.user.id,
+        postId,
+        commentId,
+      });
+
+      res.status(200).json({
+        success: true,
+        post: populatedPost,
+      });
+    } catch (error) {
+      console.error("UNLIKE COMMENT ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+
+// Reply to comment
+router.post(
+  "/reply-comment/:postId/:commentId",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { postId, commentId } = req.params;
+      const { content } = req.body;
+
+      if (!content || content.length > 280) {
+        return next(
+          new ErrorHandler(
+            "Reply is required and must be 280 characters or less",
+            400
+          )
+        );
+      }
+
+      const post = await Post.findById(postId);
+      if (!post) {
+        return next(new ErrorHandler("Post not found", 404));
+      }
+
+      // Find comment or reply
+      let targetComment = null;
+      let parentPath = null;
+
+      const findComment = (comments, path) => {
+        for (let i = 0; i < comments.length; i++) {
+          if (comments[i]._id.toString() === commentId) {
+            targetComment = comments[i];
+            parentPath = path;
+            return true;
+          }
+          if (
+            comments[i].replies &&
+            findComment(comments[i].replies, `${path}.replies.${i}`)
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      if (!findComment(post.comments, "comments")) {
+        return next(new ErrorHandler("Comment not found", 404));
+      }
+
+      targetComment.replies.push({
+        user: req.user.id,
+        content,
+        likes: [],
+        replies: [],
+        createdAt: new Date(),
+      });
+      await post.save();
+
+      const populatedPost = await Post.findById(postId).populate([
+        { path: "user", select: "username avatar" },
+        { path: "comments.user", select: "username avatar" },
+        { path: "comments.replies.user", select: "username avatar" },
+        { path: "comments.replies.replies.user", select: "username avatar" },
+      ]);
+
+      console.info("reply-comment: Reply added", {
+        userId: req.user.id,
+        postId,
+        commentId,
+        content: content.substring(0, 50),
+      });
+
+      res.status(201).json({
+        success: true,
+        post: populatedPost,
+      });
+    } catch (error) {
+      console.error("REPLY COMMENT ERROR:", error);
       return next(new ErrorHandler(error.message, 500));
     }
   })
@@ -314,9 +606,13 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     try {
       const posts = await Post.find({ user: req.params.userId })
-        .populate("user", "name avatar")
-        .populate("comments.user", "name avatar")
-        .sort({ createdAt: -1 });
+        .sort({ createdAt: -1 })
+        .populate([
+          { path: "user", select: "username avatar" },
+          { path: "comments.user", select: "username avatar" },
+          { path: "comments.replies.user", select: "username avatar" },
+          { path: "comments.replies.replies.user", select: "username avatar" },
+        ]);
 
       res.status(200).json({
         success: true,
@@ -324,6 +620,32 @@ router.get(
       });
     } catch (error) {
       console.error("GET POSTS ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Get my posts
+router.get(
+  "/my-posts",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const posts = await Post.find({ user: req.user.id })
+        .sort({ createdAt: -1 })
+        .populate([
+          { path: "user", select: "username avatar" },
+          { path: "comments.user", select: "username avatar" },
+          { path: "comments.replies.user", select: "username avatar" },
+          { path: "comments.replies.replies.user", select: "username avatar" },
+        ]);
+
+      res.status(200).json({
+        success: true,
+        posts,
+      });
+    } catch (error) {
+      console.error("GET MY POSTS ERROR:", error);
       return next(new ErrorHandler(error.message, 500));
     }
   })
@@ -341,14 +663,18 @@ router.get(
       const followedIds = following.map((f) => f.followed);
 
       const posts = await Post.find({ user: { $in: followedIds } })
-        .populate("user", "name avatar")
-        .populate("comments.user", "name avatar")
-        .sort({ createdAt: -1 });
+        .sort({ createdAt: -1 })
+        .populate([
+          { path: "user", select: "username avatar" },
+          { path: "comments.user", select: "username avatar" },
+          { path: "comments.replies.user", select: "username avatar" },
+          { path: "comments.replies.replies.user", select: "username avatar" },
+        ]);
 
       const formattedPosts = posts.map((post) => ({
         user: {
           _id: post.user._id,
-          name: post.user.name,
+          username: post.user.username || "unknown",
           avatar: post.user.avatar,
         },
         post,
@@ -365,36 +691,153 @@ router.get(
   })
 );
 
+// Fetch random posts
+router.get(
+  "/random-posts",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const postCount = await Post.countDocuments();
+      if (postCount === 0) {
+        return res.status(200).json({
+          success: true,
+          posts: [],
+          message: "No posts available in the database.",
+        });
+      }
+
+      // Fetch random posts using find and random skip
+      const randomPosts = await Post.find()
+        .skip(Math.floor(Math.random() * postCount))
+        .limit(10)
+        .populate([
+          { path: "user", select: "username avatar" },
+          { path: "comments.user", select: "username avatar" },
+          { path: "comments.replies.user", select: "username avatar" },
+          { path: "comments.replies.replies.user", select: "username avatar" },
+        ])
+        .sort({ createdAt: -1 });
+
+      const formattedPosts = randomPosts.map((post) => ({
+        user: {
+          _id: post.user?._id || null,
+          username: post.user?.username || "unknown",
+          avatar: post.user?.avatar || null,
+        },
+        post: {
+          _id: post._id,
+          content: post.content || "",
+          images: post.images || [],
+          likes: post.likes || [],
+          comments: (post.comments || []).map((comment) => ({
+            _id: comment._id,
+            user: {
+              _id: comment.user?._id || null,
+              username: comment.user?.username || "unknown",
+              avatar: comment.user?.avatar || null,
+            },
+            content: comment.content || "",
+            likes: comment.likes || [],
+            replies: (comment.replies || []).map((reply) => ({
+              _id: reply._id,
+              user: {
+                _id: reply.user?._id || null,
+                username: reply.user?.username || "unknown",
+                avatar: reply.user?.avatar || null,
+              },
+              content: reply.content || "",
+              likes: reply.likes || [],
+              replies: (reply.replies || []).map((nestedReply) => ({
+                _id: nestedReply._id,
+                user: {
+                  _id: nestedReply.user?._id || null,
+                  username: nestedReply.user?.username || "unknown",
+                  avatar: nestedReply.user?.avatar || null,
+                },
+                content: nestedReply.content || "",
+                likes: nestedReply.likes || [],
+                replies: [],
+              })),
+            })),
+          })),
+        },
+      }));
+
+      res.status(200).json({
+        success: true,
+        posts: formattedPosts,
+      });
+    } catch (error) {
+      console.error("RANDOM POSTS ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
 // Get user profile
 router.get(
   "/profile/:id",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const user = await User.findById(req.params.id).select(
-        "_id name email avatar"
+      const { id } = req.params;
+      if (!mongoose.isValidObjectId(id)) {
+        return next(new ErrorHandler("Invalid user ID format", 400));
+      }
+
+      const user = await User.findById(id).select(
+        "_id fullname username email avatar"
       );
       if (!user) {
         return next(new ErrorHandler("User not found", 404));
       }
 
-      const followers = await Follower.find({ followed: req.params.id })
-        .populate("follower", "name avatar")
+      const followers = await Follower.find({ followed: id })
+        .populate("follower", "fullname username avatar")
         .select("follower followedAt");
-      const following = await Follower.find({ follower: req.params.id })
-        .populate("followed", "name avatar")
+      const following = await Follower.find({ follower: id })
+        .populate("followed", "fullname username avatar")
         .select("followed followedAt");
-      const posts = await Post.find({ user: req.params.id })
-        .populate("user", "name avatar")
-        .populate("comments.user", "name avatar")
-        .sort({ createdAt: -1 });
+      const posts = await Post.find({ user: id })
+        .sort({ createdAt: -1 })
+        .populate([
+          { path: "user", select: "fullname username avatar" },
+          { path: "comments.user", select: "fullname username avatar" },
+          { path: "comments.replies.user", select: "fullname username avatar" },
+          {
+            path: "comments.replies.replies.user",
+            select: "fullname username avatar",
+          },
+        ]);
 
       res.status(200).json({
         success: true,
         user: {
-          ...user.toObject(),
-          followers,
-          following,
-          posts,
+          _id: user._id,
+          fullname: user.fullname,
+          username: user.username,
+          email: user.email,
+          avatar: user.avatar || null,
+          followers: followers.map((f) => ({
+            follower: f.follower || null,
+            followedAt: f.followedAt,
+          })),
+          following: following.map((f) => ({
+            followed: f.followed || null,
+            followedAt: f.followedAt,
+          })),
+          posts: posts.map((p) => ({
+            ...p.toObject(),
+            user: p.user || null,
+            comments: p.comments.map((c) => ({
+              ...c,
+              user: c.user || null,
+              replies: c.replies.map((r) => ({
+                ...r,
+                user: r.user || null,
+                replies: r.replies || [],
+              })),
+            })),
+          })),
         },
       });
     } catch (error) {
@@ -419,8 +862,8 @@ router.get(
           { senderId: recipientId, receiverId: myId },
         ],
       })
-        .populate("senderId", "name avatar")
-        .populate("receiverId", "name avatar")
+        .populate("senderId", "username avatar")
+        .populate("receiverId", "username avatar")
         .sort({ createdAt: 1 });
 
       res.status(200).json({
@@ -466,7 +909,6 @@ router.post(
         image: imageData,
       });
 
-      // Update or create conversation
       let conversation = await Conversation.findOne({
         members: { $all: [senderId, receiverId] },
       });
@@ -484,10 +926,10 @@ router.post(
       }
 
       const populatedMessage = await Message.findById(message._id)
-        .populate("senderId", "name avatar")
-        .populate("receiverId", "name avatar");
+        .populate("senderId", "username avatar")
+        .populate("receiverId", "username avatar");
 
-      const io = getIo(); // Get io instance
+      const io = getIo();
       const receiverSocketId = getReceiverSocketId(receiverId);
       const senderSocketId = getReceiverSocketId(senderId);
       if (receiverSocketId) {
@@ -564,7 +1006,7 @@ router.get(
       const conversations = await Conversation.find({
         members: { $in: [req.user._id] },
       })
-        .populate("members", "name avatar")
+        .populate("members", "username avatar")
         .populate("lastMessageId", "content image createdAt")
         .sort({ updatedAt: -1 });
 

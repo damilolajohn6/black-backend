@@ -28,6 +28,10 @@ const userSchema = new mongoose.Schema({
     required: [true, "Please enter your username"],
     unique: true,
     trim: true,
+    match: [
+      /^[a-zA-Z0-9_]{3,30}$/,
+      "Username must be 3-30 characters, letters, numbers, or underscores",
+    ],
   },
   email: {
     type: String,
@@ -64,13 +68,8 @@ const userSchema = new mongoose.Schema({
   ],
   role: {
     type: String,
-    enum: ["user", "seller", "instructor", "serviceProvider", "admin"],
+    enum: ["user", "admin", "instructor", "seller", "serviceProvider"],
     default: "user",
-  },
-  approvalStatus: {
-    isSellerApproved: { type: Boolean, default: false },
-    isInstructorApproved: { type: Boolean, default: false },
-    isServiceProviderApproved: { type: Boolean, default: false },
   },
   avatar: {
     public_id: { type: String },
@@ -125,5 +124,6 @@ userSchema.methods.createPasswordResetOtp = function () {
 // Indexes
 userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
+userSchema.index({ "fullname.firstName": 1, "fullname.lastName": 1 });
 
 module.exports = mongoose.model("User", userSchema);
