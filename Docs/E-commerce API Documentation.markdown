@@ -16,13 +16,6 @@ Endpoints marked as requiring authentication need a JWT token in the `Authorizat
 Authorization: Bearer <your_jwt_token>
 ```
 
-- **Seller Role**: Required for product and shop-related endpoints (`isSeller` middleware).
-- **Instructor Role**: Required for course-related order endpoints (`isInstructor` middleware).
-- **Admin Role**: Required for admin-specific endpoints (`isAdmin` middleware).
-- **Authenticated User**: Required for user-specific actions (`isAuthenticated` middleware).
-
-## Schemas
-
 ### Product Schema
 
 - **name** (String, required): Product name (5-100 characters).

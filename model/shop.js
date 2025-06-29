@@ -63,7 +63,7 @@ const shopSchema = new mongoose.Schema({
   role: {
     type: String,
     default: "Seller",
-    enum: ["Seller", "Admin"],
+    enum: ["Seller"],
   },
   avatar: {
     public_id: { type: String, required: false },
@@ -130,6 +130,39 @@ const shopSchema = new mongoose.Schema({
       },
     },
   ],
+  blockedUsers: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+  ],
+  notificationPreferences: {
+    receiveMessageEmails: {
+      type: Boolean,
+      default: true,
+    },
+  },
+  reviews: [
+    {
+      user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+      },
+      name: { type: String, required: true },
+      rating: { type: Number, required: true },
+      comment: { type: String },
+      images: [
+        {
+          public_id: { type: String },
+          url: { type: String },
+        },
+      ],
+      createdAt: { type: Date, default: Date.now },
+    },
+  ],
+  ratings: { type: Number, default: 0 },
+  numOfReviews: { type: Number, default: 0 },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -151,9 +184,13 @@ shopSchema.pre("save", async function (next) {
 
 // JWT token
 shopSchema.methods.getJwtToken = function () {
-  return jwt.sign({ id: this._id }, process.env.JWT_SECRET_KEY, {
-    expiresIn: process.env.JWT_EXPIRES,
-  });
+  return jwt.sign(
+    { id: this._id, role: this.role },
+    process.env.JWT_SECRET_KEY,
+    {
+      expiresIn: process.env.JWT_EXPIRES,
+    }
+  );
 };
 
 // Compare password
@@ -172,5 +209,6 @@ shopSchema.methods.createPasswordResetToken = function () {
 // Indexes for faster queries
 shopSchema.index({ email: 1 });
 shopSchema.index({ name: 1 });
+shopSchema.index({ blockedUsers: 1 });
 
 module.exports = mongoose.model("Shop", shopSchema);

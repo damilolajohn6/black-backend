@@ -68,7 +68,7 @@ const userSchema = new mongoose.Schema({
   ],
   role: {
     type: String,
-    enum: ["user", "admin", "instructor", "seller", "serviceProvider"],
+    enum: ["user"],
     default: "user",
   },
   avatar: {
@@ -84,12 +84,69 @@ const userSchema = new mongoose.Schema({
   verificationOtp: { type: String },
   verificationOtpExpiry: { type: Number },
   isVerified: { type: Boolean, default: false },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
   resetPasswordOtp: { type: String },
   resetPasswordOtpExpiry: { type: Number },
+  blockedUsers: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+  ],
+  blockedShops: [
+    {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shop",
+    },
+  ],
+  isSuspended: {
+    type: Boolean,
+    default: false,
+  },
+  suspensionReason: {
+    type: String,
+    maxlength: [500, "Suspension reason cannot exceed 500 characters"],
+  },
+  suspensionExpiry: {
+    type: Date,
+  },
+  stripeCustomerId: {
+    type: String,
+    default: null,
+  },
+  notificationPreferences: {
+    receiveMessageEmails: {
+      type: Boolean,
+      default: true,
+    },
+    newFollower: {
+      type: Boolean,
+      default: true,
+    },
+    newMessage: {
+      type: Boolean,
+      default: true,
+    },
+    addedToGroup: {
+      type: Boolean,
+      default: true,
+    },
+    newComment: {
+      type: Boolean,
+      default: true,
+    },
+    storyViewed: {
+      type: Boolean,
+      default: true,
+    },
+    contentDeleted: {
+      type: Boolean,
+      default: true,
+    },
+    accountSuspended: {
+      type: Boolean,
+      default: true,
+    },
+  },
 });
 
 // Hash password
@@ -103,9 +160,13 @@ userSchema.pre("save", async function (next) {
 
 // JWT token
 userSchema.methods.getJwtToken = function () {
-  return jwt.sign({ id: this._id }, process.env.JWT_SECRET_KEY, {
-    expiresIn: process.env.JWT_EXPIRES,
-  });
+  return jwt.sign(
+    { id: this._id, role: this.role },
+    process.env.JWT_SECRET_KEY,
+    {
+      expiresIn: process.env.JWT_EXPIRES,
+    }
+  );
 };
 
 // Compare password
@@ -125,5 +186,9 @@ userSchema.methods.createPasswordResetOtp = function () {
 userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
 userSchema.index({ "fullname.firstName": 1, "fullname.lastName": 1 });
+userSchema.index({ blockedUsers: 1 });
+userSchema.index({ blockedShops: 1 });
+userSchema.index({ isSuspended: 1 });
+userSchema.index({ stripeCustomerId: 1 });
 
 module.exports = mongoose.model("User", userSchema);

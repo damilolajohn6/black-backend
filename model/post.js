@@ -1,4 +1,3 @@
-// post.js
 const mongoose = require("mongoose");
 
 const commentSchema = new mongoose.Schema({
@@ -6,6 +5,13 @@ const commentSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
     required: true,
+    validate: {
+      validator: async function (value) {
+        const user = await mongoose.model("User").findById(value);
+        return !!user;
+      },
+      message: "User reference must point to an existing user",
+    },
   },
   content: {
     type: String,
@@ -19,7 +25,7 @@ const commentSchema = new mongoose.Schema({
       default: [],
     },
   ],
-  replies: [this],
+  replies: [{ type: mongoose.Schema.Types.Mixed }],
   createdAt: {
     type: Date,
     default: Date.now,
@@ -32,14 +38,25 @@ const postSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+      validate: {
+        validator: async function (value) {
+          const user = await mongoose.model("User").findById(value);
+          return !!user;
+        },
+        message: "User reference must point to an existing user",
+      },
     },
     content: {
       type: String,
       required: true,
       maxLength: [2800, "Post cannot exceed 2800 characters"],
     },
-    images: [
+    media: [
       {
+        type: {
+          type: String,
+          enum: ["image", "video"],
+        },
         public_id: { type: String },
         url: { type: String },
       },
@@ -56,27 +73,27 @@ const postSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Pre-save hook to initialize arrays
 postSchema.pre("save", function (next) {
-  if (!Array.isArray(this.comments)) {
-    this.comments = [];
-  }
-  if (!Array.isArray(this.likes)) {
-    this.likes = [];
-  }
-  if (!Array.isArray(this.images)) {
-    this.images = [];
-  }
+  if (!Array.isArray(this.comments)) this.comments = [];
+  if (!Array.isArray(this.likes)) this.likes = [];
+  if (!Array.isArray(this.media)) this.media = [];
+
+  // Ensure nested arrays in comments and replies are initialized
   this.comments.forEach((comment) => {
     if (!Array.isArray(comment.likes)) comment.likes = [];
     if (!Array.isArray(comment.replies)) comment.replies = [];
     comment.replies.forEach((reply) => {
+      if (!reply.user) reply.user = null; // Ensure user is set or null
       if (!Array.isArray(reply.likes)) reply.likes = [];
       if (!Array.isArray(reply.replies)) reply.replies = [];
     });
   });
+
   next();
 });
 
+// Indexes for better query performance
 postSchema.index({ user: 1, createdAt: -1 });
 postSchema.index({ "comments.user": 1 });
 postSchema.index({ "comments.replies.user": 1 });

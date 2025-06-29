@@ -40,6 +40,24 @@ const productSchema = new mongoose.Schema(
         message: "Discount price ({VALUE}) should be below regular price",
       },
     },
+    flashSale: {
+      isActive: { type: Boolean, default: false },
+      discountPrice: {
+        type: Number,
+        validate: {
+          validator: function (val) {
+            return val === undefined || val < this.price;
+          },
+          message: "Flash sale price ({VALUE}) should be below regular price",
+        },
+      },
+      startDate: { type: Date },
+      endDate: { type: Date },
+      stockLimit: {
+        type: Number,
+        min: [0, "Stock limit must be non-negative"],
+      },
+    },
     isMadeInCanada: {
       type: Boolean,
       default: false,
@@ -70,10 +88,27 @@ const productSchema = new mongoose.Schema(
           "toys",
           "food",
           "digital",
+          "beauty",
+          "sports",
+          "jewelry",
+          "automotive",
+          "health",
+          "baby",
+          "pet",
+          "office",
+          "garden",
+          "furniture",
+          "appliances",
+          "tools",
+          "hair care",
+          "skin care",
+          "bags",
+          "luggage",
+          "shoes",
           "other",
         ],
         message:
-          "Category must be one of: electronics, clothing, home, books, toys, food, digital, other",
+          "Category must be one of: electronics, clothing, home, books, toys, food, digital, beauty, sports, jewelry, automotive, health, baby, pet, office, garden, furniture, appliances, tools, luggage, other",
       },
     },
     subCategory: String,
@@ -97,11 +132,19 @@ const productSchema = new mongoose.Schema(
           required: true,
         },
         name: { type: String, required: true },
-        rating: { type: Number, required: true, min: 1, max: 5 },
-        comment: { type: String, required: true },
+        rating: { type: Number, required: true },
+        comment: { type: String },
+        images: [
+          {
+            public_id: { type: String },
+            url: { type: String },
+          },
+        ],
         createdAt: { type: Date, default: Date.now },
       },
     ],
+    ratings: { type: Number, default: 0 },
+    numOfReviews: { type: Number, default: 0 },
     shop: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Shop",
@@ -169,6 +212,12 @@ productSchema.index({ slug: 1 });
 productSchema.index({ shop: 1 });
 productSchema.index({ seller: 1 });
 productSchema.index({ isMadeInCanada: 1 });
+productSchema.index({ category: 1 });
+productSchema.index({ sold_out: -1 });
+productSchema.index({ ratingsAverage: -1 });
+productSchema.index({ createdAt: -1 });
+productSchema.index({ priceDiscount: -1 });
+productSchema.index({ "flashSale.isActive": 1, "flashSale.endDate": 1 });
 
 // Document middleware: runs before .save() and .create()
 productSchema.pre("save", function (next) {

@@ -1,346 +1,463 @@
-# User Management API Documentation
-
-This document outlines the API endpoints for user management, including user creation, authentication, profile updates, and admin operations. All endpoints requiring authentication use a JWT token in the `Authorization` header.
-
-## Base URL
-
-```
+User API Documentation
+This documentation outlines the User API, which handles user-related operations such as registration, authentication, profile management, and administrative tasks. The API is built with Express.js, MongoDB, and integrates with Cloudinary for avatar uploads and Socket.IO for real-time notifications.
+Base URL
 http://localhost:8000/api/v2/user
-```
 
-## Authentication
+Authentication
+Most endpoints require authentication via a JSON Web Token (JWT). Include the token in the Authorization header as Bearer <token>. Some endpoints require admin privileges.
+Content Types
 
-Endpoints marked as requiring authentication need a JWT token in the `Authorization` header:
+Request Body: application/json for JSON data, multipart/form-data for file uploads (e.g., avatar).
+Response: application/json
 
-```
-Authorization: Bearer <your_jwt_token>
-```
+Error Handling
+Errors are returned with a JSON object containing success: false and an error message. Common HTTP status codes include:
 
-Some endpoints require admin privileges, enforced by the `isAdmin` middleware.
+200: Success
+201: Resource created
+400: Bad request
+403: Forbidden
+404: Resource not found
+500: Server error
 
-## Endpoints
+Endpoints
+1. Create User
+Register a new user with optional avatar upload and send an OTP for email verification.
 
-### 1. Create User
+Method: POST
+Path: /create-user
+Authentication: None
+Request Body: multipart/form-data{
+  "email": "string",
+  "password": "string",
+  "fullname": "{\"firstName\": \"string\", \"lastName\": \"string\"}",
+  "username": "string",
+  "role": "user|seller|instructor|serviceProvider|admin",
+  "phone": "{\"countryCode\": \"string\", \"number\": \"string\"}",
+  "avatar": "file" // Optional image file
+}
 
-- **Endpoint**: `POST /create-user`
-- **Description**: Creates a new user account with optional avatar upload and sends an OTP for email verification.
-- **Body** (multipart/form-data):
-  - `email` (string, required): User's email
-  - `password` (string, required): Password (min 6 characters)
-  - `fullname` (JSON string, required): Object with `firstName` (required), `lastName` (required), `middleName` (optional)
-  - `username` (string, required): Username (3-30 characters, letters, numbers, or underscores)
-  - `role` (string, optional): Role (`user`, `seller`, `instructor`, `serviceProvider`, `admin`; default: `user`)
-  - `phone` (JSON string, optional): Object with `countryCode` (e.g., `+1`) and `number` (7-15 digits)
-  - `avatar` (file, optional): Image file (max 5MB)
-- **Authentication**: Not required
-- **Response**:
-  - Success: `201 Created` with a message to check email for OTP
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
 
-  ```bash
-  curl -X POST http://localhost:8000/api/v2/user/create-user \
-  -H "Content-Type: multipart/form-data" \
-  -F "email=test@example.com" \
-  -F "password=secure123" \
-  -F "fullname={\"firstName\":\"John\",\"lastName\":\"Doe\"}" \
-  -F "username=johndoe" \
-  -F "role=user" \
-  -F "phone={\"countryCode\":\"+1\",\"number\":\"1234567890\"}" \
-  -F "avatar=@/path/to/avatar.jpg"
-  ```
+Response:{
+  "success": true,
+  "message": "Please check your email (<email>) to activate your account with the OTP!"
+}
 
-### 2. Resend OTP
 
-- **Endpoint**: `POST /resend-otp`
-- **Description**: Resends an OTP to a user's email for account verification.
-- **Body**:
-  - `email` (string, required): User's email
-- **Authentication**: Not required
-- **Response**:
-  - Success: `200 OK` with a message confirming OTP sent
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/create-user" -F "email=test@example.com" -F "password=123456" -F "fullname={\"firstName\":\"John\",\"lastName\":\"Doe\"}" -F "username=johndoe" -F "role=user" -F "phone={\"countryCode\":\"+1\",\"number\":\"1234567890\"}" -F "avatar=@/path/to/avatar.jpg"
 
-  ```bash
-  curl -X POST http://localhost:8000/api/v2/user/resend-otp \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com"}'
-  ```
 
-### 3. Activate User
 
-- **Endpoint**: `POST /activation`
-- **Description**: Activates a user account using the OTP sent to their email.
-- **Body**:
-  - `email` (string, required): User's email
-  - `otp` (string, required): OTP received via email
-- **Authentication**: Not required
-- **Response**:
-  - Success: `201 Created` with a JWT token
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
+2. Resend OTP
+Resend a verification OTP to the user's email.
 
-  ```bash
-  curl -X POST http://localhost:8000/api/v2/user/activation \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "otp": "123456"}'
-  ```
+Method: POST
+Path: /resend-otp
+Authentication: None
+Request Body:{
+  "email": "string"
+}
 
-### 4. Login User
 
-- **Endpoint**: `POST /login-user`
-- **Description**: Authenticates a user and returns a JWT token.
-- **Body**:
-  - `email` (string, required): User's email
-  - `password` (string, required): User's password
-- **Authentication**: Not required
-- **Response**:
-  - Success: `201 Created` with a JWT token
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
+Response:{
+  "success": true,
+  "message": "A new OTP has been sent to <email>."
+}
 
-  ```bash
-  curl -X POST http://localhost:8000/api/v2/user/login-user \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "password": "secure123"}'
-  ```
 
-### 5. Forgot Password - Request OTP
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/resend-otp" -H "Content-Type: application/json" -d '{"email":"test@example.com"}'
 
-- **Endpoint**: `POST /forgot-password`
-- **Description**: Sends an OTP to the user's email for password reset.
-- **Body**:
-  - `email` (string, required): User's email
-- **Authentication**: Not required
-- **Response**:
-  - Success: `200 OK` with a message confirming OTP sent
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
 
-  ```bash
-  curl -X POST http://localhost:8000/api/v2/user/forgot-password \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com"}'
-  ```
 
-### 6. Reset Password
+3. Activate User
+Activate a user account using the OTP sent to their email.
 
-- **Endpoint**: `POST /reset-password`
-- **Description**: Resets the user's password using the OTP.
-- **Body**:
-  - `email` (string, required): User's email
-  - `otp` (string, required): OTP received via email
-  - `newPassword` (string, required): New password (min 6 characters)
-  - `confirmPassword` (string, required): Confirm new password
-- **Authentication**: Not required
-- **Response**:
-  - Success: `200 OK` with a success message
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
+Method: POST
+Path: /activation
+Authentication: None
+Request Body:{
+  "email": "string",
+  "otp": "string"
+}
 
-  ```bash
-  curl -X POST http://localhost:8000/api/v2/user/reset-password \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "otp": "123456", "newPassword": "newpass123", "confirmPassword": "newpass123"}'
-  ```
 
-### 7. Load User
+Response:{
+  "success": true,
+  "user": {},
+  "token": "string"
+}
 
-- **Endpoint**: `GET /getuser`
-- **Description**: Retrieves the authenticated user's information.
-- **Authentication**: Required (JWT token)
-- **Response**:
-  - Success: `200 OK` with user data
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
 
-  ```bash
-  curl -X GET http://localhost:8000/api/v2/user/getuser \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json"
-  ```
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/activation" -H "Content-Type: application/json" -d '{"email":"test@example.com","otp":"123456"}'
 
-### 8. Log Out User
 
-- **Endpoint**: `GET /logout`
-- **Description**: Logs out the authenticated user by clearing the token cookie.
-- **Authentication**: Required (JWT token)
-- **Response**:
-  - Success: `201 Created` with a success message
-  - Error: `500 Internal Server Error`
-- **Example curl**:
 
-  ```bash
-  curl -X GET http://localhost:8000/api/v2/user/logout \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json"
-  ```
+4. Login User
+Authenticate a user and return a JWT token.
 
-### 9. Update User Info
+Method: POST
+Path: /login-user
+Authentication: None
+Request Body:{
+  "email": "string",
+  "password": "string"
+}
 
-- **Endpoint**: `PUT /update-user-info`
-- **Description**: Updates the authenticated user's email, username, or phone number after password verification.
-- **Body**:
-  - `email` (string, optional): New email
-  - `password` (string, required): Current password
-  - `username` (string, optional): New username
-  - `phoneNumber` (object, optional): Object with `countryCode` and `number`
-- **Authentication**: Required (JWT token)
-- **Response**:
-  - Success: `201 Created` with updated user data
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
 
-  ```bash
-  curl -X PUT http://localhost:8000/api/v2/user/update-user-info \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "newemail@example.com", "password": "secure123", "username": "newusername", "phoneNumber": {"countryCode": "+1", "number": "9876543210"}}'
-  ```
+Response:{
+  "success": true,
+  "user": {},
+  "token": "string"
+}
 
-### 10. Update User Avatar
 
-- **Endpoint**: `PUT /update-avatar`
-- **Description**: Updates the authenticated user's avatar.
-- **Body** (multipart/form-data):
-  - `avatar` (file, required): New image file (max 5MB)
-- **Authentication**: Required (JWT token)
-- **Response**:
-  - Success: `200 OK` with updated user data
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/login-user" -H "Content-Type: application/json" -d '{"email":"test@example.com","password":"123456"}'
 
-  ```bash
-  curl -X PUT http://localhost:8000/api/v2/user/update-avatar \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: multipart/form-data" \
-  -F "avatar=@/path/to/new_avatar.jpg"
-  ```
 
-### 11. Update User Addresses
 
-- **Endpoint**: `PUT /update-user-addresses`
-- **Description**: Adds or updates an address for the authenticated user.
-- **Body**:
-  - `country` (string, optional): Country
-  - `city` (string, optional): City
-  - `address1` (string, optional): Primary address
-  - `address2` (string, optional): Secondary address
-  - `zipCode` (number, optional): Zip code
-  - `addressType` (string, required): Address type (e.g., `home`, `work`)
-  - `_id` (string, optional): Address ID for updating existing address
-- **Authentication**: Required (JWT token)
-- **Response**:
-  - Success: `200 OK` with updated user data
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
+5. Forgot Password
+Request a password reset OTP.
 
-  ```bash
-  curl -X PUT http://localhost:8000/api/v2/user/update-user-addresses \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json" \
-  -d '{"country": "USA", "city": "New York", "address1": "123 Main St", "address2": "", "zipCode": 10001, "addressType": "home"}'
-  ```
+Method: POST
+Path: /forgot-password
+Authentication: None
+Request Body:{
+  "email": "string"
+}
 
-### 12. Delete User Address
 
-- **Endpoint**: `DELETE /delete-user-address/:id`
-- **Description**: Deletes a specific address from the authenticated user's address list.
-- **Parameters**:
-  - `id` (path): Address ID
-- **Authentication**: Required (JWT token)
-- **Response**:
-  - Success: `200 OK` with updated user data
-  - Error: `500 Internal Server Error`
-- **Example curl**:
+Response:{
+  "success": true,
+  "message": "A password reset OTP has been sent to <email>."
+}
 
-  ```bash
-  curl -X DELETE http://localhost:8000/api/v2/user/delete-user-address/<address_id> \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json"
-  ```
 
-### 13. Update User Password
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/forgot-password" -H "Content-Type: application/json" -d '{"email":"test@example.com"}'
 
-- **Endpoint**: `PUT /update-user-password`
-- **Description**: Updates the authenticated user's password after verifying the old password.
-- **Body**:
-  - `oldPassword` (string, required): Current password
-  - `newPassword` (string, required): New password (min 6 characters)
-  - `confirmPassword` (string, required): Confirm new password
-- **Authentication**: Required (JWT token)
-- **Response**:
-  - Success: `200 OK` with a success message
-  - Error: `400 Bad Request` or `500 Internal Server Error`
-- **Example curl**:
 
-  ```bash
-  curl -X PUT http://localhost:8000/api/v2/user/update-user-password \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json" \
-  -d '{"oldPassword": "secure123", "newPassword": "newpass123", "confirmPassword": "newpass123"}'
-  ```
 
-### 14. Find User Information
+6. Reset Password
+Reset the user's password using the OTP.
 
-- **Endpoint**: `GET /user-info/:id`
-- **Description**: Retrieves information for a specific user by ID.
-- **Parameters**:
-  - `id` (path): User ID
-- **Authentication**: Not required
-- **Response**:
-  - Success: `200 OK` with user data
-  - Error: `404 Not Found` or `500 Internal Server Error`
-- **Example curl**:
+Method: POST
+Path: /reset-password
+Authentication: None
+Request Body:{
+  "email": "string",
+  "otp": "string",
+  "newPassword": "string",
+  "confirmPassword": "string"
+}
 
-  ```bash
-  curl -X GET http://localhost:8000/api/v2/user/user-info/<user_id> \
-  -H "Content-Type: application/json"
-  ```
 
-### 15. Get All Users (Admin)
+Response:{
+  "success": true,
+  "message": "Password reset successfully"
+}
 
-- **Endpoint**: `GET /admin-all-users`
-- **Description**: Retrieves a list of all users, sorted by creation date (admin only).
-- **Authentication**: Required (JWT token, admin role)
-- **Response**:
-  - Success: `201 Created` with a list of users
-  - Error: `500 Internal Server Error` or `401 Unauthorized`
-- **Example curl**:
 
-  ```bash
-  curl -X GET http://localhost:8000/api/v2/user/admin-all-users \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json"
-  ```
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/reset-password" -H "Content-Type: application/json" -d '{"email":"test@example.com","otp":"123456","newPassword":"newpass123","confirmPassword":"newpass123"}'
 
-### 16. Delete User (Admin)
 
-- **Endpoint**: `DELETE /delete-user/:id`
-- **Description**: Deletes a user by ID and their associated avatar (admin only).
-- **Parameters**:
-  - `id` (path): User ID
-- **Authentication**: Required (JWT token, admin role)
-- **Response**:
-  - Success: `201 Created` with a success message
-  - Error: `404 Not Found` or `500 Internal Server Error`
-- **Example curl**:
 
-  ```bash
-  curl -X DELETE http://localhost:8000/api/v2/user/delete-user/<user_id> \
-  -H "Authorization: Bearer <your_jwt_token>" \
-  -H "Content-Type: application/json"
-  ```
+7. Load User
+Retrieve the authenticated user's information.
 
-## Notes
+Method: GET
+Path: /getuser
+Authentication: Required
+Response:{
+  "success": true,
+  "user": {}
+}
 
-- Replace `<your_jwt_token>` with a valid JWT token obtained from `/login-user` or `/activation`.
-- Replace `<user_id>` and `<address_id>` with valid MongoDB ObjectIDs.
-- Ensure the server is running on `http://localhost:8000` or adjust the base URL accordingly.
-- For endpoints with file uploads (e.g., `/create-user`, `/update-avatar`), use `multipart/form-data` and specify the file path for the `avatar` field. Replace `/path/to/avatar.jpg` with the actual path to an image file.
-- The `/create-user` and `/update-user-info` endpoints expect `fullname` and `phone` as JSON strings when sent via `multipart/form-data`.
-- Admin-only endpoints (`/admin-all-users`, `/delete-user`) require a user with the `admin` role.
 
-## 684175dc852cc7f775c1b65f
+cURL Example:curl -X GET "http://localhost:8000/api/v2/user/getuser" -H "Authorization: Bearer <your_token>"
+
+
+
+8. Log Out User
+Log out the authenticated user by clearing the token cookie.
+
+Method: GET
+Path: /logout
+Authentication: None
+Response:{
+  "success": true,
+  "message": "Log out successful!"
+}
+
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/user/logout"
+
+
+
+9. Update User Info
+Update the authenticated user's email, username, or phone number.
+
+Method: PUT
+Path: /update-user-info
+Authentication: Required
+Request Body:{
+  "email": "string",
+  "password": "string",
+  "username": "string",
+  "phoneNumber": {"countryCode": "string", "number": "string"}
+}
+
+
+Response:{
+  "success": true,
+  "user": {}
+}
+
+
+cURL Example:curl -X PUT "http://localhost:8000/api/v2/user/update-user-info" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"email":"new@example.com","password":"123456","username":"newusername","phoneNumber":{"countryCode":"+1","number":"9876543210"}}'
+
+
+
+10. Update User Avatar
+Update the authenticated user's avatar.
+
+Method: PUT
+Path: /update-avatar
+Authentication: Required
+Request Body: multipart/form-data{
+  "avatar": "file" // Image file
+}
+
+
+Response:{
+  "success": true,
+  "user": {}
+}
+
+
+cURL Example:curl -X PUT "http://localhost:8000/api/v2/user/update-avatar" -H "Authorization: Bearer <your_token>" -F "avatar=@/path/to/new_avatar.jpg"
+
+
+
+11. Update User Addresses
+Add or update an address for the authenticated user.
+
+Method: PUT
+Path: /update-user-addresses
+Authentication: Required
+Request Body:{
+  "_id": "string", // Optional, for updating existing address
+  "addressType": "string",
+  "street": "string",
+  "city": "string",
+  "state": "string",
+  "country": "string",
+  "zipCode": "string"
+}
+
+
+Response:{
+  "success": true,
+  "user": {}
+}
+
+
+cURL Example:curl -X PUT "http://localhost:8000/api/v2/user/update-user-addresses" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"addressType":"Home","street":"123 Main St","city":"New York","state":"NY","country":"USA","zipCode":"10001"}'
+
+
+
+12. Delete User Address
+Delete an address for the authenticated user.
+
+Method: DELETE
+Path: /delete-user-address/:id
+Authentication: Required
+Parameters:
+id: Address ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "user": {}
+}
+
+
+cURL Example:curl -X DELETE "http://localhost:8000/api/v2/user/delete-user-address/<address_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+13. Update User Password
+Update the authenticated user's password.
+
+Method: PUT
+Path: /update-user-password
+Authentication: Required
+Request Body:{
+  "oldPassword": "string",
+  "newPassword": "string",
+  "confirmPassword": "string"
+}
+
+
+Response:{
+  "success": true,
+  "message": "Password updated successfully!"
+}
+
+
+cURL Example:curl -X PUT "http://localhost:8000/api/v2/user/update-user-password" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"oldPassword":"123456","newPassword":"newpass123","confirmPassword":"newpass123"}'
+
+
+
+14. Find User Information
+Retrieve information for a specific user by ID.
+
+Method: GET
+Path: /user-info/:id
+Authentication: None
+Parameters:
+id: User ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "user": {}
+}
+
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/user/user-info/<user_id>"
+
+
+
+15. Get All Users (Admin)
+Retrieve all users, sorted by creation date (admin only).
+
+Method: GET
+Path: /admin-all-users
+Authentication: Required (admin)
+Response:{
+  "success": true,
+  "users": []
+}
+
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/user/admin-all-users" -H "Authorization: Bearer <your_token>"
+
+
+
+16. Delete User (Admin)
+Delete a user and their associated avatar (admin only).
+
+Method: DELETE
+Path: /delete-user/:id
+Authentication: Required (admin)
+Parameters:
+id: User ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "message": "User deleted successfully!"
+}
+
+
+cURL Example:curl -X DELETE "http://localhost:8000/api/v2/user/delete-user/<user_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+17. Report User
+Report a user for review.
+
+Method: POST
+Path: /report-user/:id
+Authentication: Required
+Parameters:
+id: User ID to report (path parameter)
+
+
+Request Body:{
+  "reason": "string"
+}
+
+
+Response:{
+  "success": true,
+  "message": "User reported successfully"
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/report-user/<user_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"reason":"Inappropriate behavior"}'
+
+
+
+18. Block User
+Block a user to prevent interactions.
+
+Method: POST
+Path: /block-user/:id
+Authentication: Required
+Parameters:
+id: User ID to block (path parameter)
+
+
+Response:{
+  "success": true,
+  "message": "Blocked <username>"
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/block-user/<user_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+19. Unblock User
+Unblock a previously blocked user.
+
+Method: POST
+Path: /unblock-user/:id
+Authentication: Required
+Parameters:
+id: User ID to unblock (path parameter)
+
+
+Response:{
+  "success": true,
+  "message": "Unblocked <username>"
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/user/unblock-user/<user_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+20. Get Blocked Users
+Retrieve the list of users blocked by the authenticated user.
+
+Method: GET
+Path: /blocked-users
+Authentication: Required
+Response:{
+  "success": true,
+  "blockedUsers": []
+}
+
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/user/blocked-users" -H "Authorization: Bearer <your_token>"
+
+
+
+Real-Time Events (Socket.IO)
+The API uses Socket.IO for real-time notifications. Key events include:
+
+userBlocked: Emitted when a user is blocked.
+userUnblocked: Emitted when a user is unblocked.
+
+Notes
+
+Replace <your_token> with a valid JWT token.
+Replace <user_id> and <address_id> with valid IDs.
+Avatar uploads must be image files (max 5MB).
+Ensure environment variables for Cloudinary (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET) are configured.
+The fullname and phone fields in /create-user must be JSON strings.
+OTPs expire after 10 minutes.
+Passwords must be at least 6 characters.
+Usernames must be 3-30 characters, containing only letters, numbers, or underscores.
 

@@ -10,6 +10,8 @@ const sendToken = require("../utils/jwtToken");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { body } = require("express-validator");
 const multer = require("multer");
+const Report = require("../model/report");
+const { getIo, getReceiverSocketId } = require("../socketInstance");
 
 // Configure Cloudinary
 cloudinary.config({
@@ -693,6 +695,205 @@ router.delete(
       });
     } catch (error) {
       console.error("DELETE USER ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Report user
+router.post(
+  "/report-user/:id",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { reason } = req.body;
+      const reportedUserId = req.params.id;
+      const reporterId = req.user.id;
+
+      if (!mongoose.isValidObjectId(reportedUserId)) {
+        return next(new ErrorHandler("Invalid user ID", 400));
+      }
+
+      if (!reason || reason.length > 500) {
+        return next(
+          new ErrorHandler(
+            "Report reason is required and must be 500 characters or less",
+            400
+          )
+        );
+      }
+
+      if (reportedUserId === reporterId) {
+        return next(new ErrorHandler("Cannot report yourself", 400));
+      }
+
+      const reportedUser = await User.findById(reportedUserId);
+      if (!reportedUser) {
+        return next(new ErrorHandler("User not found", 404));
+      }
+
+      const existingReport = await Report.findOne({
+        user: reporterId,
+        reportedUser: reportedUserId,
+      });
+      if (existingReport) {
+        return next(
+          new ErrorHandler("You have already reported this user", 400)
+        );
+      }
+
+      await Report.create({
+        user: reporterId,
+        reportedUser: reportedUserId,
+        reason,
+      });
+
+      console.info("report-user: User reported", {
+        reporterId,
+        reportedUserId,
+        reason: reason.substring(0, 50),
+      });
+
+      res.status(201).json({
+        success: true,
+        message: "User reported successfully",
+      });
+    } catch (error) {
+      console.error("REPORT USER ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Block user
+router.post(
+  "/block-user/:id",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const userToBlockId = req.params.id;
+      const blockerId = req.user.id;
+
+      if (!mongoose.isValidObjectId(userToBlockId)) {
+        return next(new ErrorHandler("Invalid user ID", 400));
+      }
+
+      if (userToBlockId === blockerId) {
+        return next(new ErrorHandler("Cannot block yourself", 400));
+      }
+
+      const userToBlock = await User.findById(userToBlockId);
+      if (!userToBlock) {
+        return next(new ErrorHandler("User not found", 404));
+      }
+
+      const blocker = await User.findById(blockerId);
+      if (blocker.blockedUsers.includes(userToBlockId)) {
+        return next(new ErrorHandler("User already blocked", 400));
+      }
+
+      blocker.blockedUsers.push(userToBlockId);
+      await blocker.save();
+
+      const io = getIo();
+      const blockedUserSocketId = getReceiverSocketId(userToBlockId);
+      if (blockedUserSocketId) {
+        io.to(blockedUserSocketId).emit("userBlocked", {
+          blockerId,
+          blockedUserId: userToBlockId,
+        });
+      }
+
+      console.info("block-user: User blocked", {
+        blockerId,
+        blockedUserId: userToBlockId,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: `Blocked ${userToBlock.username}`,
+      });
+    } catch (error) {
+      console.error("BLOCK USER ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Unblock user
+router.post(
+  "/unblock-user/:id",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const userToUnblockId = req.params.id;
+      const unblockerId = req.user.id;
+
+      if (!mongoose.isValidObjectId(userToUnblockId)) {
+        return next(new ErrorHandler("Invalid user ID", 400));
+      }
+
+      if (userToUnblockId === unblockerId) {
+        return next(new ErrorHandler("Cannot unblock yourself", 400));
+      }
+
+      const userToUnblock = await User.findById(userToUnblockId);
+      if (!userToUnblock) {
+        return next(new ErrorHandler("User not found", 404));
+      }
+
+      const unblocker = await User.findById(unblockerId);
+      if (!unblocker.blockedUsers.includes(userToUnblockId)) {
+        return next(new ErrorHandler("User not blocked", 400));
+      }
+
+      unblocker.blockedUsers = unblocker.blockedUsers.filter(
+        (id) => id.toString() !== userToUnblockId
+      );
+      await unblocker.save();
+
+      const io = getIo();
+      const unblockedUserSocketId = getReceiverSocketId(userToUnblockId);
+      if (unblockedUserSocketId) {
+        io.to(unblockedUserSocketId).emit("userUnblocked", {
+          unblockerId,
+          unblockedUserId: userToUnblockId,
+        });
+      }
+
+      console.info("unblock-user: User unblocked", {
+        unblockerId,
+        unblockedUserId: userToUnblockId,
+      });
+
+      res.status(200).json({
+        success: true,
+        message: `Unblocked ${userToUnblock.username}`,
+      });
+    } catch (error) {
+      console.error("UNBLOCK USER ERROR:", error);
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Get blocked users
+router.get(
+  "/blocked-users",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const user = await User.findById(req.user.id).populate(
+        "blockedUsers",
+        "username avatar"
+      );
+
+      res.status(200).json({
+        success: true,
+        blockedUsers: user.blockedUsers,
+      });
+    } catch (error) {
+      console.error("GET BLOCKED USERS ERROR:", error);
       return next(new ErrorHandler(error.message, 500));
     }
   })

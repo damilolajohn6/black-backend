@@ -1,113 +1,33 @@
-# Social Media API Documentation
-
-This document outlines the API endpoints for social media features, including user management, following, posting, liking, commenting, messaging, and conversations. All endpoints require proper authentication where specified, using a JWT token in the `Authorization` header.
-
 Social API Documentation
-This document describes the RESTful API endpoints defined in the social.js router for a social media platform. The API supports user interactions such as following/unfollowing users, creating and liking posts, commenting and replying, messaging, and retrieving user profiles and posts. It uses Express.js, MongoDB with Mongoose, and Cloudinary for image uploads, with Socket.IO for real-time messaging.
-Table of Contents
+This documentation provides details for the Social API, which enables social networking features such as following users, creating and interacting with posts, messaging, group chats, and administrative actions. The API is built with Express.js, MongoDB, and integrates with Cloudinary for media handling and Socket.IO for real-time communication.
 
-Overview
-Setup and Dependencies
+
+Base URL
+http://localhost:8000/api/v2/social
+
 Authentication
-Helper Functions
-API Endpoints
-Users
-GET /users
+Most endpoints require authentication via a JSON Web Token (JWT). Include the token in the Authorization header as Bearer <token>. Some endpoints also require admin privileges.
+Content Types
 
-
-Follow/Unfollow
-POST /follow/:id
-POST /unfollow/:id
-
-
-Posts
-POST /create-post
-POST /like-post/:postId
-POST /unlike-post/:postId
-POST /comment-post/:postId
-POST /like-comment/:postId/:commentId
-POST /unlike-comment/:postId/:commentId
-POST /reply-comment/:postId/:commentId
-GET /posts/:userId
-GET /my-posts
-GET /timeline
-GET /random-posts
-
-
-User Profile
-GET /profile/:id
-
-
-Messaging
-GET /messages/:recipientId
-POST /send-message/:receiverId
-POST /create-conversation
-GET /conversations
-
-
-
+Request Body: application/json for JSON data, multipart/form-data for file uploads.
+Response: application/json
 
 Error Handling
-MongoDB Models
-Testing the API
-Security Considerations
-Future Improvements
+Errors are returned with a JSON object containing success: false and an error message. Common HTTP status codes include:
 
-Overview
-The social.js router handles social interactions for a web application, integrating with MongoDB for data persistence, Cloudinary for image storage, and Socket.IO for real-time messaging. Each endpoint is protected by middleware for error handling (catchAsyncErrors) and authentication (isAuthenticated) where required. The API supports CRUD operations for posts, comments, followers, and messages, with population of user data for a seamless frontend experience.
-Setup and Dependencies
-Dependencies
+200: Success
+201: Resource created
+400: Bad request
+403: Forbidden (e.g., blocked or suspended user)
+404: Resource not found
+500: Server error
 
-dotenv: Loads environment variables from a .env file.
-express: Web framework for routing.
-mongoose: ODM for MongoDB interactions.
-cloudinary: Handles image uploads and storage.
-Custom Modules:
-ErrorHandler: Custom error handling utility.
-catchAsyncErrors: Middleware for async error handling.
-isAuthenticated: Middleware for JWT-based authentication.
-User, Post, Message, Conversation, Follower: Mongoose models.
-getIo, getReceiverSocketId: Socket.IO utilities for real-time messaging.
+Endpoints
+1. Get All Users
+Retrieve a list of users for social interactions, excluding blocked or suspended users.
 
-
-
-Environment Variables
-Ensure the following are set in .env:
-CLOUDINARY_CLOUD_NAME=your_cloud_name
-CLOUDINARY_API_KEY=your_api_key
-CLOUDINARY_API_SECRET=your_api_secret
-
-Cloudinary Configuration
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-Authentication
-Most endpoints require authentication via the isAuthenticated middleware, which verifies a JWT token and attaches the authenticated user’s ID to req.user.id. Unauthenticated requests return a 401 error. Exceptions are:
-
-GET /posts/:userId (public access to user posts).
-GET /profile/:id (public access to user profiles).
-
-Helper Functions
-populateComments
-Populates user data (username, avatar) for posts, comments, and up to three levels of nested replies.
-const populateComments = (query) => {
-  return query
-    .populate({ path: "user", select: "username avatar" })
-    .populate({ path: "comments.user", select: "username avatar" })
-    .populate({ path: "comments.replies.user", select: "username avatar" })
-    .populate({ path: "comments.replies.replies.user", select: "username avatar" });
-};
-
-findComment
-Used in comment-related endpoints to locate a comment or nested reply by commentId. Includes validation and error logging to handle edge cases (e.g., invalid IDs, missing comments).
-API Endpoints
-Users
-GET /users
-Retrieve all users except the authenticated user, with follow status.
-
+Method: GET
+Path: /users
 Authentication: Required
 Query Parameters: None
 Response:{
@@ -117,74 +37,72 @@ Response:{
       "_id": "string",
       "username": "string",
       "email": "string",
-      "avatar": { "public_id": "string", "url": "string" },
+      "avatar": "string",
       "followedByMe": boolean
     }
   ]
 }
 
 
-Errors:
-500: Server error
-
-
-Example:curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/users
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/users" -H "Authorization: Bearer <your_token>"
 
 
 
-Follow/Unfollow
-POST /follow/:id
-Follow a user by ID.
+2. Follow User
+Follow another user.
 
+Method: POST
+Path: /follow/:id
 Authentication: Required
-Parameters: id (user ID to follow)
-Request Body: None
+Parameters:
+id: User ID to follow (path parameter)
+
+
 Response:{
   "success": true,
   "message": "Now following <username>"
 }
 
 
-Errors:
-400: Cannot follow yourself, already following
-404: User not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/follow/<userId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/follow/<user_id>" -H "Authorization: Bearer <your_token>"
 
 
 
-POST /unfollow/:id
-Unfollow a user by ID.
+3. Unfollow User
+Unfollow a user.
 
+Method: POST
+Path: /unfollow/:id
 Authentication: Required
-Parameters: id (user ID to unfollow)
-Request Body: None
+Parameters:
+id: User ID to unfollow (path parameter)
+
+
 Response:{
   "success": true,
   "message": "Unfollowed <username>"
 }
 
 
-Errors:
-400: Cannot unfollow yourself, not following
-404: User not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/unfollow/<userId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/unfollow/<user_id>" -H "Authorization: Bearer <your_token>"
 
 
 
-Posts
-POST /create-post
-Create a new post with optional images.
+4. Create Post
+Create a new post with optional media (up to 4 items).
 
+Method: POST
+Path: /create-post
 Authentication: Required
 Request Body:{
-  "content": "string", // Required, max 280 characters
-  "images": ["string"] // Optional, base64-encoded images, max 4
+  "content": "string",
+  "media": [
+    {
+      "url": "string",
+      "public_id": "string",
+      "type": "image|video"
+    }
+  ]
 }
 
 
@@ -194,74 +112,90 @@ Response:{
     "_id": "string",
     "user": "string",
     "content": "string",
-    "images": [{ "public_id": "string", "url": "string" }],
-    "likes": ["string"],
+    "media": [],
+    "likes": [],
     "comments": []
   }
 }
 
 
-Errors:
-400: Invalid content length
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
--d '{"content":"Hello world!"}' http://localhost:8000/api/v2/social/create-post
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/create-post" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"content":"Hello world","media":[{"url":"https://example.com/image.jpg","public_id":"image_id","type":"image"}]}'
 
 
 
-POST /like-post/:postId
+5. Delete Post
+Delete a post and its associated media.
+
+Method: DELETE
+Path: /delete-post/:postId
+Authentication: Required (must be post owner)
+Parameters:
+postId: Post ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "message": "Post deleted successfully",
+  "postId": "string"
+}
+
+
+cURL Example:curl -X DELETE "http://localhost:8000/api/v2/social/delete-post/<post_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+6. Like Post
 Like a post.
 
+Method: POST
+Path: /like-post/:postId
 Authentication: Required
-Parameters: postId (post ID)
-Request Body: None
+Parameters:
+postId: Post ID (path parameter)
+
+
 Response:{
   "success": true,
   "message": "Post liked"
 }
 
 
-Errors:
-400: Already liked
-404: Post not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/like-post/<postId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/like-post/<post_id>" -H "Authorization: Bearer <your_token>"
 
 
 
-POST /unlike-post/:postId
+7. Unlike Post
 Unlike a post.
 
+Method: POST
+Path: /unlike-post/:postId
 Authentication: Required
-Parameters: postId (post ID)
-Request Body: None
+Parameters:
+postId: Post ID (path parameter)
+
+
 Response:{
   "success": true,
   "message": "Post unliked"
 }
 
 
-Errors:
-400: Not liked
-404: Post not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/unlike-post/<postId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/unlike-post/<post_id>" -H "Authorization: Bearer <your_token>"
 
 
 
-POST /comment-post/:postId
+8. Comment on Post
 Add a comment to a post.
 
+Method: POST
+Path: /comment-post/:postId
 Authentication: Required
-Parameters: postId (post ID)
+Parameters:
+postId: Post ID (path parameter)
+
+
 Request Body:{
-  "content": "string" // Required, max 280 characters
+  "content": "string"
 }
 
 
@@ -269,205 +203,195 @@ Response:{
   "success": true,
   "post": {
     "_id": "string",
-    "user": { "_id": "string", "username": "string", "avatar": {} },
+    "user": {},
     "content": "string",
-    "comments": [
-      {
-        "_id": "string",
-        "user": { "_id": "string", "username": "string", "avatar": {} },
-        "content": "string",
-        "likes": [],
-        "replies": []
-      }
-    ]
+    "media": [],
+    "likes": [],
+    "comments": []
   }
 }
 
 
-Errors:
-400: Invalid content length
-404: Post not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
--d '{"content":"Nice post!"}' http://localhost:8000/api/v2/social/comment-post/<postId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/comment-post/<post_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"content":"Great post!"}'
 
 
 
-POST /like-comment/:postId/:commentId
-Like a comment or nested reply.
+9. Report Post
+Report a post for review.
 
+Method: POST
+Path: /report-post/:postId
 Authentication: Required
 Parameters:
-postId (post ID)
-commentId (comment or reply ID)
-
-
-Request Body: None
-Response:{
-  "success": true,
-  "post": { /* Populated post object */ }
-}
-
-
-Errors:
-400: Invalid IDs, already liked
-404: Post or comment not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/like-comment/<postId>/<commentId>
-
-
-
-POST /unlike-comment/:postId/:commentId
-Unlike a comment or nested reply.
-
-Authentication: Required
-Parameters:
-postId (post ID)
-commentId (comment or reply ID)
-
-
-Request Body: None
-Response:{
-  "success": true,
-  "post": { /* Populated post object */ }
-}
-
-
-Errors:
-400: Invalid IDs, not liked
-404: Post or comment not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/unlike-comment/<postId>/<commentId>
-
-
-
-POST /reply-comment/:postId/:commentId
-Reply to a comment or nested reply.
-
-Authentication: Required
-Parameters:
-postId (post ID)
-`commentId** (comment ID to reply to)
+postId: Post ID (path parameter)
 
 
 Request Body:{
-  "content": "string" // Required, max 280 chars
+  "reason": "string"
 }
 
 
 Response:{
   "success": true,
-  "post": { /* Populated post */ }
+  "message": "Post reported successfully"
 }
 
 
-Errors:
-400: Invalid content length, invalid IDs
-404: Post or comment not found
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
--d '{"content":"Thanks!"}' http://localhost:8000/api/v2/social/reply-comment/<postId>/<commentId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/report-post/<post_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"reason":"Inappropriate content"}'
 
 
 
-GET /posts/:userId
-Get posts by a specific user.
+10. Like Comment
+Like a comment on a post.
 
-Authentication: Not required
-Parameters: userId (user ID)
+Method: POST
+Path: /like-comment/:postId/:commentId
+Authentication: Required
+Parameters:
+postId: Post ID (path parameter)
+commentId: Comment ID (path parameter)
+
+
 Response:{
   "success": true,
-  "posts": [/* Array of populated post objects */]
+  "post": {}
 }
 
 
-Errors:
-500: Server error
-
-
-Example:curl http://localhost:8000/api/v2/social/posts/<userId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/like-comment/<post_id>/<comment_id>" -H "Authorization: Bearer <your_token>"
 
 
 
-GET /my-posts
-Get authenticated user’s posts.
+11. Unlike Comment
+Unlike a comment on a post.
 
+Method: POST
+Path: /unlike-comment/:postId/:commentId
+Authentication: Required
+Parameters:
+postId: Post ID (path parameter)
+commentId: Comment ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "post": {}
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/unlike-comment/<post_id>/<comment_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+12. Reply to Comment
+Reply to a comment on a post.
+
+Method: POST
+Path: /reply-comment/:postId/:commentId
+Authentication: Required
+Parameters:
+postId: Post ID (path parameter)
+commentId: Comment ID (path parameter)
+
+
+Request Body:{
+  "content": "string"
+}
+
+
+Response:{
+  "success": true,
+  "post": {}
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/reply-comment/<post_id>/<comment_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"content":"Thanks for the comment!"}'
+
+
+
+13. Get User Posts
+Retrieve posts by a specific user.
+
+Method: GET
+Path: /posts/:userId
+Authentication: Optional
+Parameters:
+userId: User ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "posts": []
+}
+
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/posts/<user_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+14. Get My Posts
+Retrieve authenticated user's posts.
+
+Method: GET
+Path: /my-posts
 Authentication: Required
 Response:{
   "success": true,
-  "posts": [/* Array of populated post objects */]
+  "posts": []
 }
 
 
-Errors:
-500: Server error
-
-
-Example:curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/my-posts
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/my-posts" -H "Authorization: Bearer <your_token>"
 
 
 
-GET /timeline
-Get posts from followed users.
+15. Get Timeline Posts
+Retrieve posts from users the authenticated user follows.
 
+Method: GET
+Path: /timeline
 Authentication: Required
 Response:{
   "success": true,
   "posts": [
     {
-      "user": { "_id": "string", "username": "string", "avatar": {} },
-      "post": { /* Populated post object */ }
+      "user": {},
+      "post": {}
     }
   ]
 }
 
 
-Errors:
-500: Server error
-
-
-Example:curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/timeline
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/timeline" -H "Authorization: Bearer <your_token>"
 
 
 
-GET /random-posts
-Get 10 random posts.
+16. Fetch Random Posts
+Retrieve random posts, excluding those from blocked users.
 
+Method: GET
+Path: /random-posts
 Authentication: Required
 Response:{
   "success": true,
-  "posts": [
-    {
-      "user": { "_id": "string", "username": "string", "avatar": {} },
-      "post": { /* Populated post object */ }
-    }
-  ],
-  "message": "string" // If no posts
+  "posts": []
 }
 
 
-Errors:
-500: Server error
-
-
-Example:curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/random-posts
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/random-posts" -H "Authorization: Bearer <your_token>"
 
 
 
-User Profile
-GET /profile/:id
-Get a user’s profile, followers, following, and posts.
+17. Get User Profile
+Retrieve a user's profile, including followers, following, and posts.
 
-Authentication: Not required
-Parameters: id (user ID)
+Method: GET
+Path: /profile/:id
+Authentication: Optional
+Parameters:
+id: User ID (path parameter)
+
+
 Response:{
   "success": true,
   "user": {
@@ -475,315 +399,356 @@ Response:{
     "fullname": "string",
     "username": "string",
     "email": "string",
-    "avatar": {},
-    "followers": [{ "follower": {}, "followedAt": "date" }],
-    "following": [{ "followed": {}, "followedAt": "date" }],
-    "posts": [/* Populated post objects */]
+    "avatar": "string",
+    "followers": [],
+    "following": [],
+    "posts": []
   }
 }
 
 
-Errors:
-400: Invalid user ID
-404: User not found
-500: Server error
-
-
-Example:curl http://localhost:8000/api/v2/social/profile/<userId>
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/profile/<user_id>" -H "Authorization: Bearer <your_token>"
 
 
 
-Messaging
-GET /messages/:recipientId
-Get messages between authenticated user and recipient.
+18. Get Messages
+Retrieve messages between the authenticated user and another user.
 
+Method: GET
+Path: /messages/:recipientId
 Authentication: Required
-Parameters: recipientId (user ID)
+Parameters:
+recipientId: Recipient's user ID (path parameter)
+
+
 Response:{
   "success": true,
-  "messages": [
+  "messages": []
+}
+
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/messages/<recipient_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+19. Send Message
+Send a direct message with optional media.
+
+Method: POST
+Path: /send-message/:receiverId
+Authentication: Required
+Parameters:
+receiverId: Recipient's user ID (path parameter)
+
+
+Request Body:{
+  "content": "string",
+  "media": [
     {
-      "_id": "string",
-      "senderId": { "_id": "string", "username": "string", "avatar": {} },
-      "receiverId": { "_id": "string", "username": "string", "avatar": {} },
-      "content": "string",
-      "image": {},
-      "createdAt": "date"
+      "data": "string",
+      "type": "image|video"
     }
   ]
 }
 
 
-Errors:
-500: Server error
+Response:{
+  "success": true,
+  "message": {}
+}
 
 
-Example:curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/messages/<recipientId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/send-message/<receiver_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"content":"Hi there!"}'
 
 
 
-POST /send-message/:receiverId
-Send a message with optional image.
+20. Delete Message
+Delete a message sent by the authenticated user.
 
+Method: DELETE
+Path: /delete-message/:messageId
 Authentication: Required
-Parameters: receiverId (user ID)
+Parameters:
+messageId: Message ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "message": "Message deleted successfully",
+  "messageId": "string"
+}
+
+
+cURL Example:curl -X DELETE "http://localhost:8000/api/v2/social/delete-message/<message_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+21. Reset Social Activity
+Delete all posts, messages, and follower relationships for the authenticated user.
+
+Method: DELETE
+Path: /reset-social
+Authentication: Required
+Response:{
+  "success": true,
+  "message": "Social activity reset successfully"
+}
+
+
+cURL Example:curl -X DELETE "http://localhost:8000/api/v2/social/reset-social" -H "Authorization: Bearer <your_token>"
+
+
+
+22. Search Users and Posts
+Search for users and posts by query string.
+
+Method: GET
+Path: /search
+Authentication: Required
+Query Parameters:
+query: Search term (min 3 characters)
+page: Page number (default: 1)
+limit: Results per page (default: 10)
+
+
+Response:{
+  "success": true,
+  "users": [],
+  "posts": [],
+  "page": number,
+  "limit": number
+}
+
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/search?query=test&page=1&limit=10" -H "Authorization: Bearer <your_token>"
+
+
+
+23. Create Group Chat
+Create a group chat with multiple members.
+
+Method: POST
+Path: /create-group-chat
+Authentication: Required
 Request Body:{
-  "content": "string", // Optional if image provided
-  "image": "string" // Optional, base64-encoded
+  "name": "string",
+  "members": ["user_id_1", "user_id_2"]
 }
 
 
 Response:{
   "success": true,
-  "message": { /* Populated message object */ }
+  "group": {},
+  "conversation": {}
 }
 
 
-Errors:
-400: Content or image required
-500: Server error
-
-
-Real-Time: Emits newMessage and messageSent via Socket.IO.
-Example:curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
--d '{"content":"Hi!"}' http://localhost:8000/api/v2/social/send-message/<receiverId>
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/create-group-chat" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"name":"My Group","members":["<user_id_1>","<user_id_2>"]}'
 
 
 
-POST /create-conversation
-Create a new conversation or return existing one.
+24. Send Group Message
+Send a message to a group chat.
 
+Method: POST
+Path: /send-group-message/:groupId
 Authentication: Required
+Parameters:
+groupId: Group chat ID (path parameter)
+
+
 Request Body:{
-  "userId": "string", // Required
-  "groupTitle": "string" // Optional
-}
-
-
-Response:{
-  "success": true,
-  "conversation": {
-    "_id": "string",
-    "members": ["string"],
-    "groupTitle": "string"
-  }
-}
-
-
-Errors:
-500: Server error
-
-
-Example:curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
--d '{"userId":"recipientId"}' http://localhost:8000/api/v2/social/create-conversation
-
-
-GET /conversations
-Get all conversations for the authenticated user, including members and last message details.
-
-Authentication: Required
-Query Parameters: None
-Response:{
-  "success": true,
-  "conversations": [
+  "content": "string",
+  "media": [
     {
-      "_id": "string",
-      "members": [
-        {
-          "_id": "string",
-          "username": "string",
-          "avatar": { "public_id": "string", "url": "string" }
-        }
-      ],
-      "groupTitle": "string",
-      "lastMessage": "string",
-      "lastMessageId": {
-        "_id": "string",
-        "content": "string",
-        "image": { "public_id": "string", "url": "string" },
-        "createdAt": "date"
-      },
-      "updatedAt": "date"
+      "data": "string",
+      "type": "image|video"
     }
   ]
 }
 
 
-Errors:
-500: Server error
-
-
-Example:curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v2/social/conversations
-
-
-
-Error Handling
-All endpoints use the catchAsyncErrors middleware to handle asynchronous errors gracefully. Errors are passed to the ErrorHandler utility, which formats responses as:
-{
-  "success": false,
-  "message": "Error message",
-  "statusCode": 400|404|500
+Response:{
+  "success": true,
+  "message": {}
 }
 
 
-400 Bad Request: Invalid input (e.g., missing content, invalid IDs).
-401 Unauthorized: Missing or invalid JWT token.
-404 Not Found: Resource (e.g., user, post, comment) not found.
-500 Internal Server Error: Unexpected server issues, logged with console.error.
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/send-group-message/<group_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"content":"Group message!"}'
 
-Detailed error logs are output to the console for debugging, including context-specific information (e.g., user ID, post ID).
-MongoDB Models
-The API relies on the following Mongoose models (assumed based on usage):
-User
-{
-  _id: ObjectId,
-  fullname: String,
-  username: String,
-  email: String,
-  avatar: {
-    public_id: String,
-    url: String
-  }
+
+
+25. Get Group Messages
+Retrieve messages in a group chat.
+
+Method: GET
+Path: /group-messages/:groupId
+Authentication: Required
+Parameters:
+groupId: Group chat ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "messages": []
 }
 
-Post
-{
-  _id: ObjectId,
-  user: ObjectId, // References User
-  content: String,
-  images: [
-    {
-      public_id: String,
-      url: String
-    }
-  ],
-  likes: [ObjectId], // References User
-  comments: [
-    {
-      _id: ObjectId,
-      user: ObjectId, // References User
-      content: String,
-      likes: [ObjectId], // References User
-      replies: [Comment], // Recursive, up to 3 levels
-      createdAt: Date
-    }
-  ],
-  createdAt: Date
+
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/group-messages/<group_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+26. Add Group Member
+Add a user to a group chat (admin only).
+
+Method: POST
+Path: /add-group-member/:groupId
+Authentication: Required (admin)
+Parameters:
+groupId: Group chat ID (path parameter)
+
+
+Request Body:{
+  "userId": "string"
 }
 
-Follower
-{
-  _id: ObjectId,
-  follower: ObjectId, // References User
-  followed: ObjectId, // References User
-  followedAt: Date
+
+Response:{
+  "success": true,
+  "message": "Added <username> to the group"
 }
 
-Message
-{
-  _id: ObjectId,
-  senderId: ObjectId, // References User
-  receiverId: ObjectId, // References User
-  content: String,
-  image: {
-    public_id: String,
-    url: String
-  },
-  createdAt: Date
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/add-group-member/<group_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"userId":"<user_id>"}'
+
+
+
+27. Remove Group Member
+Remove a user from a group chat (admin only).
+
+Method: POST
+Path: /remove-group-member/:groupId
+Authentication: Required (admin)
+Parameters:
+groupId: Group chat ID (path parameter)
+
+
+Request Body:{
+  "userId": "string"
 }
 
-Conversation
-{
-  _id: ObjectId,
-  members: [ObjectId], // References User
-  groupTitle: String,
-  lastMessage: String,
-  lastMessageId: ObjectId, // References Message
-  updatedAt: Date
+
+Response:{
+  "success": true,
+  "message": "Removed <username> from the group"
 }
 
-Testing the API
-Tools
 
-Postman or cURL for manual testing.
-Jest with supertest for automated tests.
-MongoDB Compass for database inspection.
-
-Example Test (Jest + Supertest)
-const request = require('supertest');
-const app = require('../app'); // Your Express app
-const mongoose = require('mongoose');
-
-describe('Social API', () => {
-  let token, userId, postId;
-
-  beforeAll(async () => {
-    // Connect to test database
-    await mongoose.connect('mongodb://localhost/test_db');
-    // Register and login to get token
-    const res = await request(app)
-      .post('/api/v2/auth/login')
-      .send({ email: 'test@example.com', password: 'password' });
-    token = res.body.token;
-    userId = res.body.user._id;
-  });
-
-  it('should create a post', async () => {
-    const res = await request(app)
-      .post('/api/v2/social/create-post')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ content: 'Test post' });
-    expect(res.status).toBe(201);
-    expect(res.body.success).toBe(true);
-    postId = res.body.post._id;
-  });
-
-  afterAll(async () => {
-    await mongoose.connection.dropDatabase();
-    await mongoose.connection.close();
-  });
-});
-
-Manual Testing
-
-Start Server:npm start
-
-
-Test Authentication:Obtain a JWT token via /api/v2/auth/login (assumed endpoint).
-Test Endpoints:Use cURL commands provided in the endpoint examples.
-Inspect Database:Use MongoDB Compass to verify data (e.g., new posts, comments).
-Monitor Logs:Check server logs for errors or info messages.
-
-Security Considerations
-
-Authentication:
-Use secure JWT tokens with short expiration.
-Validate req.user.id in isAuthenticated middleware.
-
-
-Input Validation:
-Validate ObjectIds with mongoose.isValidObjectId.
-Enforce content length limits (280 characters).
-Sanitize inputs to prevent XSS (not implemented; recommended).
-
-
-Rate Limiting:
-Add express-rate-limit to prevent abuse:const rateLimit = require('express-rate-limit');
-router.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/remove-group-member/<group_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"userId":"<user_id>"}'
 
 
 
+28. Get Admin Reports
+Retrieve all reports (admin only).
 
-Image Uploads:
-Validate image formats and sizes before Cloudinary upload.
-Use Cloudinary’s secure URLs.
+Method: GET
+Path: /admin/reports
+Authentication: Required (admin)
+Response:{
+  "success": true,
+  "reports": []
+}
 
 
-Data Exposure:
-Select only necessary fields in queries (e.g., username, avatar).
-Avoid exposing sensitive user data (e.g., passwords, emails in public endpoints).
+cURL Example:curl -X GET "http://localhost:8000/api/v2/social/admin/reports" -H "Authorization: Bearer <your_token>"
 
 
-Socket.IO:
-Authenticate Socket.IO connections using JWT.
-Prevent unauthorized message emissions.
+
+29. Suspend User
+Suspend a user (admin only).
+
+Method: POST
+Path: /admin/suspend-user/:userId
+Authentication: Required (admin)
+Parameters:
+userId: User ID to suspend (path parameter)
+
+
+Request Body:{
+  "reason": "string",
+  "durationDays": number
+}
+
+
+Response:{
+  "success": true,
+  "message": "User <username> suspended successfully"
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/admin/suspend-user/<user_id>" -H "Authorization: Bearer <your_token>" -H "Content-Type: application/json" -d '{"reason":"Violation","durationDays":7}'
+
+
+
+30. Unsuspend User
+Unsuspend a user (admin only).
+
+Method: POST
+Path: /admin/unsuspend-user/:userId
+Authentication: Required (admin)
+Parameters:
+userId: User ID to unsuspend (path parameter)
+
+
+Response:{
+  "success": true,
+  "message": "User <username> unsuspended successfully"
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/admin/unsuspend-user/<user_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+31. Delete Reported Content
+Delete reported content and resolve the report (admin only).
+
+Method: POST
+Path: /admin/delete-reported-content/:reportId
+Authentication: Required (admin)
+Parameters:
+reportId: Report ID (path parameter)
+
+
+Response:{
+  "success": true,
+  "message": "Reported content deleted and report resolved"
+}
+
+
+cURL Example:curl -X POST "http://localhost:8000/api/v2/social/admin/delete-reported-content/<report_id>" -H "Authorization: Bearer <your_token>"
+
+
+
+Real-Time Events (Socket.IO)
+The API uses Socket.IO for real-time communication. Key events include:
+
+newMessage: Emitted when a new direct message is sent.
+messageSent: Emitted to the sender to confirm message delivery.
+messageDeleted: Emitted when a message is deleted.
+groupChatCreated: Emitted when a group chat is created.
+newGroupMessage: Emitted when a group message is sent.
+groupMemberAdded: Emitted when a member is added to a group.
+groupMemberRemoved: Emitted when a member is removed from a group.
+userSuspended: Emitted when a user is suspended.
+userUnsuspended: Emitted when a user is unsuspended.
+contentDeleted: Emitted when reported content is deleted.
+
+Notes
+
+Replace <your_token> with a valid JWT token.
+Replace <user_id>, <post_id>, <comment_id>, <message_id>, <group_id>, and <report_id> with valid IDs.
+Ensure environment variables for Cloudinary (CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET) are configured.
+Media uploads must include valid url, public_id, and type for posts, or data and type for messages.
+All endpoints respect block and suspension status, preventing interactions with blocked or suspended users.
+

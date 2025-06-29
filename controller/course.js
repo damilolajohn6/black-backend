@@ -45,18 +45,34 @@ router.post(
       } = req.body;
 
       // Validate required fields
-      if (!title || !title.en) return next(new ErrorHandler("English course title is required", 400));
-      if (!description || !description.en) return next(new ErrorHandler("English course description is required", 400));
-      if (!learningObjectives || !Array.isArray(learningObjectives) || learningObjectives.length === 0)
-        return next(new ErrorHandler("At least one learning objective is required", 400));
-      if (price === undefined || price === null) return next(new ErrorHandler("Course price is required", 400));
-      if (isFree && price !== 0) return next(new ErrorHandler("Price must be 0 for free courses", 400));
-      if (!isFree && price <= 0) return next(new ErrorHandler("Price must be greater than 0 for paid courses", 400));
+      if (!title)
+        return next(new ErrorHandler("Course title is required", 400));
+      if (!description)
+        return next(new ErrorHandler("Course description is required", 400));
+      if (
+        !learningObjectives ||
+        !Array.isArray(learningObjectives) ||
+        learningObjectives.length === 0
+      )
+        return next(
+          new ErrorHandler("At least one learning objective is required", 400)
+        );
+      if (price === undefined || price === null)
+        return next(new ErrorHandler("Course price is required", 400));
+      if (isFree && price !== 0)
+        return next(new ErrorHandler("Price must be 0 for free courses", 400));
+      if (!isFree && price <= 0)
+        return next(
+          new ErrorHandler("Price must be greater than 0 for paid courses", 400)
+        );
       if (!categories || !Array.isArray(categories) || categories.length === 0)
         return next(new ErrorHandler("At least one category is required", 400));
-      if (!thumbnail?.url) return next(new ErrorHandler("Course thumbnail URL is required", 400));
+      if (!thumbnail?.url)
+        return next(new ErrorHandler("Course thumbnail URL is required", 400));
       if (!content || !Array.isArray(content) || content.length === 0)
-        return next(new ErrorHandler("At least one content section is required", 400));
+        return next(
+          new ErrorHandler("At least one content section is required", 400)
+        );
 
       const course = {
         title,
@@ -71,35 +87,47 @@ router.post(
         level: level || "All Levels",
         language: language || "English",
         instructor: req.instructor._id,
-        content: content.map((section) => ({
+        content: content.map((section, secIdx) => ({
           sectionTitle: section.sectionTitle || "Untitled Section",
-          lectures: section.lectures?.map((lecture) => ({
-            title: lecture.title || "Untitled Lecture",
-            description: lecture.description || "",
-            video: lecture.videoUrl ? {
-              url: lecture.videoUrl,
-              public_id: lecture.public_id || "",
-              duration: lecture.duration || 0,
-            } : null,
-            resources: [],
-          })) || [],
+          order: section.order || secIdx + 1,
+          lectures:
+            section.lectures?.map((lecture, lecIdx) => ({
+              title: lecture.title || "Untitled Lecture",
+              description: lecture.description || "",
+              video: lecture.videoUrl
+                ? {
+                    url: lecture.videoUrl,
+                    public_id: lecture.public_id || "",
+                    duration: lecture.duration || 0,
+                  }
+                : null,
+              resources: [],
+              timeline: lecture.timeline || [],
+              order: lecture.order || lecIdx + 1,
+            })) || [],
         })),
       };
 
       // Handle thumbnail
       if (!thumbnail.url.includes("cloudinary.com")) {
-        const thumbnailResult = await cloudinary.uploader.upload(thumbnail.url, {
-          folder: "course_thumbnails",
-          width: 720,
-          crop: "scale",
-          resource_type: "image",
-        });
+        const thumbnailResult = await cloudinary.uploader.upload(
+          thumbnail.url,
+          {
+            folder: "course_thumbnails",
+            width: 720,
+            crop: "scale",
+            resource_type: "image",
+          }
+        );
         course.thumbnail = {
           public_id: thumbnailResult.public_id,
           url: thumbnailResult.secure_url,
         };
       } else {
-        course.thumbnail = { url: thumbnail.url, public_id: thumbnail.public_id || "" };
+        course.thumbnail = {
+          url: thumbnail.url,
+          public_id: thumbnail.public_id || "",
+        };
       }
 
       // Handle preview video
@@ -109,10 +137,16 @@ router.post(
           previewResult = await cloudinary.uploader.upload(previewVideo.url, {
             folder: "course_preview_videos",
             resource_type: "video",
-            transformation: [{ quality: "auto", fetch_format: "mp4", duration: 300 }],
+            transformation: [
+              { quality: "auto", fetch_format: "mp4", duration: 300 },
+            ],
           });
         } else {
-          previewResult = { secure_url: previewVideo.url, public_id: previewVideo.public_id || "", duration: previewVideo.duration || 0 };
+          previewResult = {
+            secure_url: previewVideo.url,
+            public_id: previewVideo.public_id || "",
+            duration: previewVideo.duration || 0,
+          };
         }
         course.previewVideo = {
           public_id: previewResult.public_id,
@@ -124,12 +158,19 @@ router.post(
       // Validate lecture videos
       for (const section of course.content) {
         for (const lecture of section.lectures) {
-          if (lecture.video && !lecture.video.url.includes("cloudinary.com") && !lecture.video.public_id) {
-            const videoResult = await cloudinary.uploader.upload(lecture.video.url, {
-              folder: `courses/temp/lectures`,
-              resource_type: "video",
-              transformation: [{ quality: "auto", fetch_format: "mp4" }],
-            });
+          if (
+            lecture.video &&
+            !lecture.video.url.includes("cloudinary.com") &&
+            !lecture.video.public_id
+          ) {
+            const videoResult = await cloudinary.uploader.upload(
+              lecture.video.url,
+              {
+                folder: `courses/temp/lectures`,
+                resource_type: "video",
+                transformation: [{ quality: "auto", fetch_format: "mp4" }],
+              }
+            );
             lecture.video = {
               public_id: videoResult.public_id,
               url: videoResult.secure_url,
@@ -143,14 +184,14 @@ router.post(
       console.info("create-course: Course created", {
         courseId: newCourse._id,
         instructorId: req.instructor._id,
-        title: title.en,
+        title,
       });
 
       try {
         await sendMail({
           email: req.instructor.email,
           subject: "New Course Created",
-          message: `Hello ${req.instructor.fullname.firstName}, your course "${title.en}" has been created successfully and is in Draft status.`,
+          message: `Hello ${req.instructor.fullname.firstName}, your course "${title}" has been created successfully and is in Pending status.`,
         });
       } catch (emailError) {
         console.error("EMAIL SEND ERROR:", emailError.message);
@@ -213,7 +254,27 @@ router.put(
       if (tags) course.tags = tags;
       if (level) course.level = level;
       if (language) course.language = language;
-      if (content) course.content = content;
+      if (content) {
+        course.content = content.map((section, secIdx) => ({
+          sectionTitle: section.sectionTitle || "Untitled Section",
+          order: section.order || secIdx + 1,
+          lectures:
+            section.lectures?.map((lecture, lecIdx) => ({
+              title: lecture.title || "Untitled Lecture",
+              description: lecture.description || "",
+              video: lecture.videoUrl
+                ? {
+                    url: lecture.videoUrl,
+                    public_id: lecture.public_id || "",
+                    duration: lecture.duration || 0,
+                  }
+                : null,
+              resources: lecture.resources || [],
+              timeline: lecture.timeline || [],
+              order: lecture.order || lecIdx + 1,
+            })) || [],
+        }));
+      }
       if (status) course.status = status;
 
       // Update thumbnail
@@ -286,7 +347,8 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     try {
       const { courseId, sectionId } = req.params;
-      const { lectureTitle, videoUrl, duration, description } = req.body;
+      const { lectureTitle, videoUrl, duration, description, timeline, order } =
+        req.body;
 
       if (!lectureTitle || !videoUrl || !duration)
         return next(
@@ -327,6 +389,8 @@ router.post(
           duration: videoResult.duration || duration,
         },
         description,
+        timeline: timeline || [],
+        order: order || section.lectures.length + 1,
       });
 
       await course.save();
@@ -426,7 +490,7 @@ router.post(
         await sendMail({
           email: req.instructor.email,
           subject: "Course Submitted for Review",
-          message: `Hello ${req.instructor.fullname.firstName}, your course "${course.title.en}" has been submitted for review.`,
+          message: `Hello ${req.instructor.fullname.firstName}, your course "${course.title}" has been submitted for review.`,
         });
       } catch (error) {
         console.error("EMAIL SEND ERROR:", error);
@@ -1050,8 +1114,12 @@ router.get(
   isInstructor,
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const courses = await Course.find({ status: "Published" }).select("categories tags");
-      const categories = [...new Set(courses.flatMap((course) => course.categories))];
+      const courses = await Course.find({ status: "Published" }).select(
+        "categories tags"
+      );
+      const categories = [
+        ...new Set(courses.flatMap((course) => course.categories)),
+      ];
       const tags = [...new Set(courses.flatMap((course) => course.tags))];
 
       res.status(200).json({
@@ -1062,43 +1130,6 @@ router.get(
     } catch (error) {
       console.error("GET SUGGESTED CATEGORIES TAGS ERROR:", error);
       return next(new ErrorHandler(error.message, 500));
-    }
-  })
-);
-
-// Save draft version
-router.post(
-  "/save-draft/:id",
-  isInstructor,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const course = await Course.findById(req.params.id);
-      if (!course) return next(new ErrorHandler("Course not found", 404));
-      if (course.instructor.toString() !== req.instructor._id.toString())
-        return next(new ErrorHandler("Unauthorized: Not your course", 403));
-
-      const draftData = req.body;
-      const latestVersion = course.draftVersions.length > 0
-        ? Math.max(...course.draftVersions.map((v) => v.version))
-        : 0;
-
-      course.draftVersions.push({
-        data: draftData,
-        version: latestVersion + 1,
-      });
-
-      if (course.draftVersions.length > 5) {
-        course.draftVersions.shift();
-      }
-
-      await course.save();
-      res.status(200).json({
-        success: true,
-        message: "Draft saved successfully",
-      });
-    } catch (error) {
-      console.error("SAVE DRAFT ERROR:", error);
-      return next(new ErrorHandler(error.message, 400));
     }
   })
 );

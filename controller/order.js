@@ -1,6 +1,7 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const router = express.Router();
+const { body, query, param, validationResult } = require("express-validator");
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const {
@@ -15,62 +16,100 @@ const Product = require("../model/product");
 const Course = require("../model/course");
 const Instructor = require("../model/instructor");
 const Enrollment = require("../model/enrollment");
+const User = require("../model/user");
 const sendMail = require("../utils/sendMail");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const logger = require("../utils/logger");
 
-// Valid status transitions aligned with Order schema
+// Valid status transitions
 const STATUS_TRANSITIONS = {
-  Pending: ["Confirmed", "Cancelled"],
-  Confirmed: ["Shipped", "Cancelled"],
+  Pending: ["Confirmed", "Cancelled", "Refund Requested"],
+  Confirmed: ["Shipped", "Cancelled", "Refund Requested"],
   Shipped: ["Delivered"],
-  Delivered: ["Refunded"],
+  Delivered: ["Refund Requested"],
+  "Refund Requested": ["Refund Success", "Cancelled"],
+  "Refund Success": [],
   Cancelled: [],
-  Refunded: [],
 };
+
+// Validation middleware for order creation
+const validateCreateOrder = [
+  body("cart")
+    .isArray({ min: 1 })
+    .withMessage("Cart must be a non-empty array"),
+  body("cart.*.itemType")
+    .isIn(["Product", "Course"])
+    .withMessage("Invalid itemType, must be Product or Course"),
+  body("cart.*.itemId").isMongoId().withMessage("Invalid itemId"),
+  body("cart.*.quantity")
+    .isInt({ min: 1 })
+    .withMessage("Quantity must be at least 1"),
+  body("cart.*.shopId").optional().isMongoId().withMessage("Invalid shopId"),
+  body("cart.*.instructorId")
+    .optional()
+    .isMongoId()
+    .withMessage("Invalid instructorId"),
+  body("totalAmount")
+    .isFloat({ min: 0 })
+    .withMessage("Valid total amount is required"),
+  body("taxAmount")
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage("Tax amount must be non-negative"),
+  body("discountAmount")
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage("Discount amount must be non-negative"),
+  body("paymentStatus")
+    .optional()
+    .isIn(["Pending", "Paid"])
+    .withMessage("Invalid paymentStatus"),
+  body("shippingAddress")
+    .optional()
+    .custom((value, { req }) => {
+      if (
+        req.body.cart.some((item) => item.itemType === "Product") &&
+        (!value ||
+          !value.address ||
+          !value.city ||
+          !value.country ||
+          !value.zipCode)
+      ) {
+        throw new Error(
+          "Complete shipping address is required for physical products"
+        );
+      }
+      return true;
+    }),
+  body("currency")
+    .optional()
+    .isIn(["USD", "CAD", "EUR"])
+    .withMessage("Unsupported currency"),
+];
 
 // Create new order
 router.post(
   "/create-order",
   isAuthenticated,
+  validateCreateOrder,
   catchAsyncErrors(async (req, res, next) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        throw new ErrorHandler(errors.array()[0].msg, 400);
+      }
+
       const {
         cart,
         shippingAddress,
         totalAmount,
-        paymentStatus = "Paid",
+        taxAmount = 0,
+        discountAmount = 0,
+        paymentStatus = "Pending",
+        currency = shippingAddress?.country === "Canada" ? "CAD" : "USD",
       } = req.body;
-
-      // Validate input
-      if (!cart || !Array.isArray(cart) || cart.length === 0) {
-        throw new ErrorHandler("Cart is required and cannot be empty", 400);
-      }
-      if (!totalAmount || totalAmount <= 0) {
-        throw new ErrorHandler("Valid total amount is required", 400);
-      }
-
-      // Validate shippingAddress for physical products
-      let hasPhysicalProducts = false;
-      for (const item of cart) {
-        if (item.itemType === "Product") {
-          hasPhysicalProducts = true;
-          break;
-        }
-      }
-      if (
-        hasPhysicalProducts &&
-        (!shippingAddress ||
-          !shippingAddress.address ||
-          !shippingAddress.city ||
-          !shippingAddress.country ||
-          !shippingAddress.zipCode)
-      ) {
-        throw new ErrorHandler(
-          "Complete shipping address is required for physical products",
-          400
-        );
-      }
 
       // Group items by shopId or instructorId
       const shopItemsMap = new Map();
@@ -78,34 +117,6 @@ router.post(
       let calculatedTotal = 0;
 
       for (const item of cart) {
-        if (
-          !item.itemType ||
-          !item.itemId ||
-          !item.quantity ||
-          item.quantity < 1 ||
-          !["Product", "Course"].includes(item.itemType)
-        ) {
-          throw new ErrorHandler(
-            "Invalid cart item: itemType (Product or Course), itemId, and quantity are required",
-            400
-          );
-        }
-        if (!mongoose.Types.ObjectId.isValid(item.itemId)) {
-          throw new ErrorHandler(`Invalid itemId: ${item.itemId}`, 400);
-        }
-        if (item.shopId && !mongoose.Types.ObjectId.isValid(item.shopId)) {
-          throw new ErrorHandler(`Invalid shopId: ${item.shopId}`, 400);
-        }
-        if (
-          item.instructorId &&
-          !mongoose.Types.ObjectId.isValid(item.instructorId)
-        ) {
-          throw new ErrorHandler(
-            `Invalid instructorId: ${item.instructorId}`,
-            400
-          );
-        }
-
         if (item.itemType === "Product") {
           const product = await Product.findById(item.itemId)
             .select("name price priceDiscount stock shop status shipping")
@@ -143,12 +154,16 @@ router.post(
             shopItemsMap.set(shopId, []);
           }
           const price = product.priceDiscount || product.price;
+          const discountApplied = product.priceDiscount
+            ? product.price - product.priceDiscount
+            : 0;
           shopItemsMap.get(shopId).push({
             itemType: "Product",
             itemId: item.itemId,
             name: product.name,
             quantity: item.quantity,
             price,
+            discountApplied,
           });
           calculatedTotal +=
             price * item.quantity + (product.shipping?.cost || 0);
@@ -157,7 +172,7 @@ router.post(
           product.stock -= item.quantity;
           product.sold_out = (product.sold_out || 0) + item.quantity;
           await product.save({ session, validateBeforeSave: false });
-          console.debug("create-order: Product stock updated", {
+          logger.debug("create-order: Product stock updated", {
             productId: item.itemId,
             name: product.name,
             quantity: item.quantity,
@@ -198,29 +213,82 @@ router.post(
             instructorItemsMap.set(instructorId, []);
           }
           const price = course.discountPrice || course.price;
+          const discountApplied = course.discountPrice
+            ? course.price - course.discountPrice
+            : 0;
           instructorItemsMap.get(instructorId).push({
             itemType: "Course",
             itemId: item.itemId,
             name: course.title,
             quantity: item.quantity,
             price,
+            discountApplied,
           });
           calculatedTotal += price * item.quantity;
         }
       }
 
       // Validate totalAmount
-      if (Math.abs(calculatedTotal - totalAmount) > 0.01) {
-        throw new ErrorHandler("Total amount does not match cart items", 400);
+      const expectedTotal = calculatedTotal + taxAmount - discountAmount;
+      if (Math.abs(expectedTotal - totalAmount) > 0.01) {
+        throw new ErrorHandler(
+          `Total amount mismatch. Expected: ${expectedTotal}, Received: ${totalAmount}`,
+          400
+        );
       }
 
-      // Validate paymentStatus
-      if (!["Pending", "Paid"].includes(paymentStatus)) {
-        throw new ErrorHandler("Invalid paymentStatus", 400);
-      }
-
-      // Create orders
       const orders = [];
+      let paymentIntent = null;
+      let ephemeralKey = null;
+
+      // Create payment intent if paymentStatus is Pending
+      if (paymentStatus === "Pending") {
+        const user = await User.findById(req.user._id).session(session);
+        if (!user) {
+          throw new ErrorHandler("User not found", 404);
+        }
+
+        let customerId = user.stripeCustomerId;
+        if (!customerId) {
+          const customer = await stripe.customers.create({
+            email: user.email,
+            name: user.name,
+            metadata: { userId: user._id.toString() },
+          });
+          customerId = customer.id;
+          await User.findByIdAndUpdate(
+            user._id,
+            { stripeCustomerId: customerId },
+            { session, new: true }
+          );
+        }
+
+        // Create ephemeral key for client-side payment
+        ephemeralKey = await stripe.ephemeralKeys.create(
+          { customer: customerId },
+          { apiVersion: "2023-10-16" }
+        );
+
+        paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(totalAmount * 100),
+          currency,
+          customer: customerId,
+          automatic_payment_methods: { enabled: true },
+          metadata: {
+            company: "BlackandSell",
+            userId: user._id.toString(),
+          },
+          description: `Payment for order creation`,
+          receipt_email: user.email,
+        });
+
+        logger.info("create-order: Payment intent created", {
+          paymentIntentId: paymentIntent.id,
+          userId: user._id,
+          customerId,
+          currency,
+        });
+      }
 
       // Shop orders
       for (const [shopId, items] of shopItemsMap) {
@@ -236,57 +304,47 @@ router.post(
           (sum, item) => sum + item.price * item.quantity,
           0
         );
+        const orderTax = (orderTotal / calculatedTotal) * taxAmount;
+        const orderDiscount = (orderTotal / calculatedTotal) * discountAmount;
 
         const order = new Order({
           shop: shopId,
           customer: req.user._id,
           items,
           totalAmount: orderTotal,
-          paymentStatus,
+          taxAmount: orderTax,
+          discountAmount: orderDiscount,
+          paymentInfo: paymentIntent
+            ? {
+                id: paymentIntent.id,
+                status:
+                  paymentIntent.status === "requires_payment_method"
+                    ? "Pending"
+                    : paymentIntent.status,
+                type: "card",
+              }
+            : {
+                status: paymentStatus,
+              },
           shippingAddress,
           status: "Pending",
           statusHistory: [
             {
               status: "Pending",
+              updatedBy: req.user._id.toString(),
+              updatedByModel: "User",
               reason: "Order created",
-              updatedAt: new Date(),
             },
           ],
         });
 
         await order.save({ session });
+        orders.push(order);
 
-        // Update shop balance and transactions if paid
+        // Update shop balance if Paid
         if (paymentStatus === "Paid") {
-          const serviceCharge = order.totalAmount * 0.1; // 10% platform fee
+          const serviceCharge = order.totalAmount * 0.1;
           const shopAmount = order.totalAmount - serviceCharge;
-
-          // Normalize withdrawMethod.type if invalid
-          if (shop.withdrawMethod && shop.withdrawMethod.type) {
-            if (shop.withdrawMethod.type.toLowerCase() === "paypal") {
-              shop.withdrawMethod.type = "PayPal";
-              console.warn("create-order: Normalized withdrawMethod.type", {
-                shopId,
-                oldType: "paypal",
-                newType: "PayPal",
-              });
-            }
-            if (
-              !["BankTransfer", "PayPal", "Other"].includes(
-                shop.withdrawMethod.type
-              )
-            ) {
-              console.warn(
-                "create-order: Invalid withdrawMethod.type, unsetting",
-                {
-                  shopId,
-                  invalidType: shop.withdrawMethod.type,
-                }
-              );
-              shop.withdrawMethod = null;
-            }
-          }
-
           shop.availableBalance = (shop.availableBalance || 0) + shopAmount;
           shop.transactions.push({
             amount: shopAmount,
@@ -295,39 +353,26 @@ router.post(
             createdAt: new Date(),
             metadata: { orderId: order._id, source: "Order Payment" },
           });
-
-          try {
-            await shop.save({ session, validateBeforeSave: true });
-            console.debug("create-order: Shop balance updated", {
-              shopId,
-              availableBalance: shop.availableBalance,
-              added: shopAmount,
-            });
-          } catch (saveError) {
-            console.error("create-order: Failed to save shop balance", {
-              shopId,
-              error: saveError.message,
-            });
-            console.warn(
-              "create-order: Proceeding without balance update due to validation error",
-              {
-                shopId,
-                orderId: order._id,
-              }
-            );
-          }
+          await shop.save({ session });
+          logger.debug("create-order: Shop balance updated", {
+            shopId,
+            orderId: order._id,
+            added: shopAmount,
+          });
         }
 
         // Send email to seller
         try {
           await sendMail({
             email: shop.email,
-            subject: `New Order Received - Order #${order._id}`,
+            subject: `New Order #${order._id}`,
             message: `Dear ${
               shop.name
-            },\n\nA new order has been placed.\n\nOrder ID: ${
+            },\n\nA new order has been placed.\nOrder ID: ${
               order._id
-            }\nTotal: $${order.totalAmount.toFixed(2)}\nItems:\n${items
+            }\nTotal: $${order.totalAmount.toFixed(
+              2
+            )} (${currency})\nItems:\n${items
               .map(
                 (item) =>
                   `- ${item.name} (Qty: ${
@@ -336,28 +381,26 @@ router.post(
               )
               .join(
                 "\n"
-              )}\n\nPlease process the order in your dashboard.\n\nBest regards,\nE-commerce Platform`,
+              )}\n\nProcess the order in your dashboard.\n\nBest regards,\nBlackandSell`,
           });
-          console.info("create-order: Email sent to seller", {
+          logger.info("create-order: Email sent to seller", {
             shopId,
             orderId: order._id,
             email: shop.email,
           });
         } catch (emailError) {
-          console.error("create-order: Failed to send seller email", {
+          logger.error("create-order: Failed to send seller email", {
             shopId,
             orderId: order._id,
             error: emailError.message,
           });
         }
 
-        orders.push(order);
-        console.info("create-order: Shop order created", {
+        logger.info("create-order: Shop order created", {
           orderId: order._id,
           shopId,
-          customerId: req.user._id,
           totalAmount: orderTotal,
-          paymentStatus,
+          currency,
         });
       }
 
@@ -374,7 +417,7 @@ router.post(
           !instructor.approvalStatus.isInstructorApproved
         ) {
           throw new ErrorHandler(
-            `Instructor is not verified or approved: ${instructorId}`,
+            `Instructor not verified: ${instructorId}`,
             403
           );
         }
@@ -383,24 +426,41 @@ router.post(
           (sum, item) => sum + item.price * item.quantity,
           0
         );
+        const orderTax = (orderTotal / calculatedTotal) * taxAmount;
+        const orderDiscount = (orderTotal / calculatedTotal) * discountAmount;
 
         const order = new Order({
           instructor: instructorId,
           customer: req.user._id,
           items,
           totalAmount: orderTotal,
-          paymentStatus,
+          taxAmount: orderTax,
+          discountAmount: orderDiscount,
+          paymentInfo: paymentIntent
+            ? {
+                id: paymentIntent.id,
+                status:
+                  paymentIntent.status === "requires_payment_method"
+                    ? "Pending"
+                    : paymentIntent.status,
+                type: "card",
+              }
+            : {
+                status: paymentStatus,
+              },
           status: "Confirmed",
           statusHistory: [
             {
               status: "Confirmed",
+              updatedBy: req.user._id.toString(),
+              updatedByModel: "User",
               reason: "Course order created",
-              updatedAt: new Date(),
             },
           ],
         });
 
         await order.save({ session });
+        orders.push(order);
 
         // Create enrollments
         for (const item of items) {
@@ -430,7 +490,7 @@ router.post(
           }
         }
 
-        // Update instructor balance and transactions if paid
+        // Update instructor balance if Paid
         if (paymentStatus === "Paid") {
           const serviceCharge = order.totalAmount * 0.1;
           const instructorAmount = order.totalAmount - serviceCharge;
@@ -450,12 +510,14 @@ router.post(
         try {
           await sendMail({
             email: instructor.email,
-            subject: `New Course Order - Order #${order._id}`,
+            subject: `New Course Order #${order._id}`,
             message: `Dear ${
               instructor.fullname.firstName
-            },\n\nA new course order has been placed.\n\nOrder ID: ${
+            },\n\nA new course order has been placed.\nOrder ID: ${
               order._id
-            }\nTotal: $${order.totalAmount.toFixed(2)}\nItems:\n${items
+            }\nTotal: $${order.totalAmount.toFixed(
+              2
+            )} (${currency})\nItems:\n${items
               .map(
                 (item) =>
                   `- ${item.name} (Qty: ${
@@ -464,42 +526,48 @@ router.post(
               )
               .join(
                 "\n"
-              )}\n\nReview details in your dashboard.\n\nBest regards,\nE-commerce Platform`,
+              )}\n\nReview details in your dashboard.\n\nBest regards,\nBlackandSell`,
           });
-          console.info("create-order: Email sent to instructor", {
+          logger.info("create-order: Email sent to instructor", {
             instructorId,
             orderId: order._id,
             email: instructor.email,
           });
         } catch (emailError) {
-          console.error("create-order: Failed to send instructor email", {
+          logger.error("create-order: Failed to send instructor email", {
             instructorId,
             orderId: order._id,
             error: emailError.message,
           });
         }
 
-        orders.push(order);
-        console.info("create-order: Course order created", {
+        logger.info("create-order: Course order created", {
           orderId: order._id,
           instructorId,
-          customerId: req.user._id,
           totalAmount: orderTotal,
-          paymentStatus,
+          currency,
         });
       }
 
       await session.commitTransaction();
+
       res.status(201).json({
         success: true,
         orders,
+        paymentIntent: paymentIntent
+          ? {
+              clientSecret: paymentIntent.client_secret,
+              paymentIntentId: paymentIntent.id,
+              ephemeralKey: ephemeralKey.secret,
+              customerId: paymentIntent.customer,
+            }
+          : null,
       });
     } catch (error) {
       await session.abortTransaction();
-      console.error("create-order error:", {
+      logger.error("create-order error", {
         message: error.message,
         stack: error.stack,
-        body: req.body,
         userId: req.user?._id,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
@@ -509,14 +577,15 @@ router.post(
   })
 );
 
-// Get single order (seller)
+// Get single order (seller or instructor)
 router.get(
   "/get-single-order/:id",
-  isSeller,
+  isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     try {
       const order = await Order.findById(req.params.id)
         .populate("shop", "name email")
+        .populate("instructor", "fullname email")
         .populate(
           "customer",
           "username fullname.firstName fullname.lastName email"
@@ -526,20 +595,20 @@ router.get(
         return next(new ErrorHandler("Order not found", 404));
       }
       if (
-        order.shop &&
-        order.shop._id.toString() !== req.seller._id.toString()
+        order.customer._id.toString() !== req.user._id.toString() &&
+        (!req.seller ||
+          order.shop?._id.toString() !== req.seller._id.toString()) &&
+        (!req.instructor ||
+          order.instructor?._id.toString() !== req.instructor._id.toString())
       ) {
-        return next(
-          new ErrorHandler(
-            "Unauthorized: Order does not belong to your shop",
-            403
-          )
-        );
+        return next(new ErrorHandler("Unauthorized to access this order", 403));
       }
 
-      console.info("get-single-order: Order retrieved", {
+      logger.info("get-single-order: Order retrieved", {
         orderId: req.params.id,
-        shopId: req.seller._id,
+        userId: req.user._id,
+        shopId: req.seller?._id,
+        instructorId: req.instructor?._id,
       });
 
       res.status(200).json({
@@ -547,13 +616,12 @@ router.get(
         order,
       });
     } catch (error) {
-      console.error("get-single-order error:", {
+      logger.error("get-single-order error", {
         message: error.message,
         stack: error.stack,
         orderId: req.params.id,
-        shopId: req.seller?._id,
       });
-      return next(new ErrorHandler(error.message, error.statusCode || 500));
+      return next(new ErrorHandler(error.message, 500));
     }
   })
 );
@@ -562,8 +630,41 @@ router.get(
 router.get(
   "/get-all-orders/:userId",
   isAuthenticated,
+  [
+    param("userId").isMongoId().withMessage("Invalid user ID"),
+    query("status")
+      .optional()
+      .isIn([
+        "Pending",
+        "Confirmed",
+        "Shipped",
+        "Delivered",
+        "Cancelled",
+        "Refund Requested",
+        "Refund Success",
+      ])
+      .withMessage("Invalid status"),
+    query("page")
+      .optional()
+      .isInt({ min: 1 })
+      .withMessage("Invalid page number"),
+    query("limit").optional().isInt({ min: 1 }).withMessage("Invalid limit"),
+    query("sortBy")
+      .optional()
+      .isIn(["createdAt", "totalAmount", "status"])
+      .withMessage("Invalid sortBy field"),
+    query("sortOrder")
+      .optional()
+      .isIn(["asc", "desc"])
+      .withMessage("Invalid sortOrder"),
+  ],
   catchAsyncErrors(async (req, res, next) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
       if (
         req.user._id.toString() !== req.params.userId &&
         req.user.role !== "admin"
@@ -573,8 +674,23 @@ router.get(
         );
       }
 
-      const orders = await Order.find({ customer: req.params.userId })
-        .sort({ createdAt: -1 })
+      const {
+        status,
+        page = 1,
+        limit = 10,
+        sortBy = "createdAt",
+        sortOrder = "desc",
+      } = req.query;
+      const query = { customer: req.params.userId };
+      if (status) query.status = status;
+
+      const sort = {};
+      sort[sortBy] = sortOrder === "asc" ? 1 : -1;
+
+      const orders = await Order.find(query)
+        .sort(sort)
+        .skip((page - 1) * limit)
+        .limit(Number(limit))
         .populate("shop", "name email")
         .populate("instructor", "fullname email")
         .populate(
@@ -582,17 +698,25 @@ router.get(
           "username fullname.firstName fullname.lastName email"
         );
 
-      console.info("get-all-orders: Orders retrieved", {
+      const total = await Order.countDocuments(query);
+
+      logger.info("get-all-orders: Orders retrieved", {
         userId: req.params.userId,
         orderCount: orders.length,
+        page,
+        limit,
+        status,
       });
 
       res.status(200).json({
         success: true,
         orders,
+        total,
+        page: Number(page),
+        pages: Math.ceil(total / limit),
       });
     } catch (error) {
-      console.error("get-all-orders error:", {
+      logger.error("get-all-orders error", {
         message: error.message,
         stack: error.stack,
         userId: req.params.userId,
@@ -606,15 +730,58 @@ router.get(
 router.get(
   "/get-seller-all-orders/:shopId",
   isSeller,
+  [
+    param("shopId").isMongoId().withMessage("Invalid shop ID"),
+    query("status")
+      .optional()
+      .isIn([
+        "Pending",
+        "Confirmed",
+        "Shipped",
+        "Delivered",
+        "Cancelled",
+        "Refund Requested",
+        "Refund Success",
+      ])
+      .withMessage("Invalid status"),
+    query("page")
+      .optional()
+      .isInt({ min: 1 })
+      .withMessage("Invalid page number"),
+    query("limit").optional().isInt({ min: 1 }).withMessage("Invalid limit"),
+    query("startDate").optional().isISO8601().withMessage("Invalid startDate"),
+    query("endDate").optional().isISO8601().withMessage("Invalid endDate"),
+    query("sortBy")
+      .optional()
+      .isIn(["createdAt", "totalAmount", "status"])
+      .withMessage("Invalid sortBy field"),
+    query("sortOrder")
+      .optional()
+      .isIn(["asc", "desc"])
+      .withMessage("Invalid sortOrder"),
+  ],
   catchAsyncErrors(async (req, res, next) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
       if (req.seller._id.toString() !== req.params.shopId) {
         return next(
           new ErrorHandler("Unauthorized to access these orders", 403)
         );
       }
 
-      const { status, page = 1, limit = 10, startDate, endDate } = req.query;
+      const {
+        status,
+        page = 1,
+        limit = 10,
+        startDate,
+        endDate,
+        sortBy = "createdAt",
+        sortOrder = "desc",
+      } = req.query;
       const query = { shop: req.params.shopId };
       if (status) query.status = status;
       if (startDate || endDate) {
@@ -623,8 +790,11 @@ router.get(
         if (endDate) query.createdAt.$lte = new Date(endDate);
       }
 
+      const sort = {};
+      sort[sortBy] = sortOrder === "asc" ? 1 : -1;
+
       const orders = await Order.find(query)
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip((page - 1) * limit)
         .limit(Number(limit))
         .populate("shop", "name email")
@@ -635,7 +805,7 @@ router.get(
 
       const total = await Order.countDocuments(query);
 
-      console.info("get-seller-all-orders: Orders retrieved", {
+      logger.info("get-seller-all-orders: Orders retrieved", {
         shopId: req.params.shopId,
         orderCount: orders.length,
         page,
@@ -653,11 +823,10 @@ router.get(
         pages: Math.ceil(total / limit),
       });
     } catch (error) {
-      console.error("get-seller-all-orders error:", {
+      logger.error("get-seller-all-orders error", {
         message: error.message,
         stack: error.stack,
         shopId: req.params.shopId,
-        query: req.query,
       });
       return next(new ErrorHandler(error.message, 500));
     }
@@ -668,15 +837,58 @@ router.get(
 router.get(
   "/get-instructor-all-orders/:instructorId",
   isInstructor,
+  [
+    param("instructorId").isMongoId().withMessage("Invalid instructor ID"),
+    query("status")
+      .optional()
+      .isIn([
+        "Pending",
+        "Confirmed",
+        "Shipped",
+        "Delivered",
+        "Cancelled",
+        "Refund Requested",
+        "Refund Success",
+      ])
+      .withMessage("Invalid status"),
+    query("page")
+      .optional()
+      .isInt({ min: 1 })
+      .withMessage("Invalid page number"),
+    query("limit").optional().isInt({ min: 1 }).withMessage("Invalid limit"),
+    query("startDate").optional().isISO8601().withMessage("Invalid startDate"),
+    query("endDate").optional().isISO8601().withMessage("Invalid endDate"),
+    query("sortBy")
+      .optional()
+      .isIn(["createdAt", "totalAmount", "status"])
+      .withMessage("Invalid sortBy field"),
+    query("sortOrder")
+      .optional()
+      .isIn(["asc", "desc"])
+      .withMessage("Invalid sortOrder"),
+  ],
   catchAsyncErrors(async (req, res, next) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
       if (req.instructor._id.toString() !== req.params.instructorId) {
         return next(
           new ErrorHandler("Unauthorized to access these orders", 403)
         );
       }
 
-      const { status, page = 1, limit = 10, startDate, endDate } = req.query;
+      const {
+        status,
+        page = 1,
+        limit = 10,
+        startDate,
+        endDate,
+        sortBy = "createdAt",
+        sortOrder = "desc",
+      } = req.query;
       const query = { instructor: req.params.instructorId };
       if (status) query.status = status;
       if (startDate || endDate) {
@@ -685,8 +897,11 @@ router.get(
         if (endDate) query.createdAt.$lte = new Date(endDate);
       }
 
+      const sort = {};
+      sort[sortBy] = sortOrder === "asc" ? 1 : -1;
+
       const orders = await Order.find(query)
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip((page - 1) * limit)
         .limit(Number(limit))
         .populate("instructor", "fullname email")
@@ -697,7 +912,7 @@ router.get(
 
       const total = await Order.countDocuments(query);
 
-      console.info("get-instructor-all-orders: Orders retrieved", {
+      logger.info("get-instructor-all-orders: Orders retrieved", {
         instructorId: req.params.instructorId,
         orderCount: orders.length,
         page,
@@ -715,11 +930,10 @@ router.get(
         pages: Math.ceil(total / limit),
       });
     } catch (error) {
-      console.error("get-instructor-all-orders error:", {
+      logger.error("get-instructor-all-orders error", {
         message: error.message,
         stack: error.stack,
         instructorId: req.params.instructorId,
-        query: req.query,
       });
       return next(new ErrorHandler(error.message, 500));
     }
@@ -730,10 +944,33 @@ router.get(
 router.put(
   "/update-order-status/:id",
   isSeller,
+  [
+    param("id").isMongoId().withMessage("Invalid order ID"),
+    body("status")
+      .isIn([
+        "Confirmed",
+        "Shipped",
+        "Delivered",
+        "Cancelled",
+        "Refund Requested",
+        "Refund Success",
+      ])
+      .withMessage("Invalid status"),
+    body("reason")
+      .optional()
+      .isString()
+      .trim()
+      .withMessage("Reason must be a string"),
+  ],
   catchAsyncErrors(async (req, res, next) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
       const { status, reason } = req.body;
       const order = await Order.findById(req.params.id)
         .populate("shop customer")
@@ -751,34 +988,54 @@ router.put(
           403
         );
       }
-      if (!status || !STATUS_TRANSITIONS[order.status].includes(status)) {
+      if (!STATUS_TRANSITIONS[order.status].includes(status)) {
         throw new ErrorHandler(
           `Invalid status transition from ${order.status} to ${status}`,
           400
         );
       }
 
-      // Update payment status to Paid if not already (for legacy orders)
-      if (status === "Delivered" && order.paymentStatus !== "Paid") {
-        order.paymentStatus = "Paid";
+      if (status === "Cancelled") {
+        for (const item of order.items) {
+          if (item.itemType === "Product") {
+            const product = await Product.findById(item.itemId).session(
+              session
+            );
+            if (product) {
+              product.stock += item.quantity;
+              product.sold_out = Math.max(
+                0,
+                (product.sold_out || 0) - item.quantity
+              );
+              await product.save({ session });
+              logger.debug("update-order-status: Product stock restored", {
+                productId: item.itemId,
+                quantity: item.quantity,
+                newStock: product.stock,
+              });
+            }
+          }
+        }
       }
 
       order.status = status;
       order.statusHistory.push({
         status,
-        updatedAt: new Date(),
+        updatedBy: req.seller._id.toString(),
+        updatedByModel: "Seller",
         reason: reason || `Status updated to ${status}`,
       });
 
-      await order.save({ session, validateBeforeSave: false });
+      await order.save({ session });
 
       // Send email to customer
       try {
-        const customerName = order.customer?.username || "Customer";
         await sendMail({
           email: order.customer.email,
-          subject: `Order Update - Order #${order._id}`,
-          message: `Dear ${customerName},\n\nYour order has been updated.\n\nOrder ID: ${
+          subject: `Order Update #${order._id}`,
+          message: `Dear ${
+            order.customer.username || "Customer"
+          },\n\nYour order has been updated.\nOrder ID: ${
             order._id
           }\nStatus: ${status}\nTotal: $${order.totalAmount.toFixed(2)}\n${
             reason ? `Reason: ${reason}\n` : ""
@@ -791,24 +1048,22 @@ router.put(
             )
             .join(
               "\n"
-            )}\n\nView details in your account.\n\nBest regards,\nE-commerce Platform`,
+            )}\n\nView details in your account.\n\nBest regards,\nBlackandSell`,
         });
-        console.info("update-order-status: Email sent to customer", {
+        logger.info("update-order-status: Email sent to customer", {
           orderId: order._id,
           customerId: order.customer._id,
-          email: order.customer.email,
           status,
         });
       } catch (emailError) {
-        console.error("update-order-status: Failed to send customer email", {
+        logger.error("update-order-status: Failed to send customer email", {
           orderId: order._id,
-          customerId: order.customer._id,
           error: emailError.message,
         });
       }
 
       await session.commitTransaction();
-      console.info("update-order-status: Order updated", {
+      logger.info("update-order-status: Order updated", {
         orderId: order._id,
         shopId: req.seller._id,
         newStatus: status,
@@ -820,12 +1075,11 @@ router.put(
       });
     } catch (error) {
       await session.abortTransaction();
-      console.error("update-order-status error:", {
+      logger.error("update-order-status error", {
         message: error.message,
         stack: error.stack,
         orderId: req.params.id,
         shopId: req.seller?._id,
-        status: req.body.status,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
     } finally {
@@ -838,10 +1092,26 @@ router.put(
 router.put(
   "/update-course-order-status/:id",
   isInstructor,
+  [
+    param("id").isMongoId().withMessage("Invalid order ID"),
+    body("status")
+      .isIn(["Confirmed", "Cancelled", "Refund Requested", "Refund Success"])
+      .withMessage("Invalid status for course order"),
+    body("reason")
+      .optional()
+      .isString()
+      .trim()
+      .withMessage("Reason must be a string"),
+  ],
   catchAsyncErrors(async (req, res, next) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
       const { status, reason } = req.body;
       const order = await Order.findById(req.params.id)
         .populate("instructor customer")
@@ -859,17 +1129,14 @@ router.put(
           403
         );
       }
-      if (!status || !["Confirmed", "Refunded", "Cancelled"].includes(status)) {
+      if (!STATUS_TRANSITIONS[order.status].includes(status)) {
         throw new ErrorHandler(
-          `Invalid status for course order: ${status}`,
+          `Invalid status transition from ${order.status} to ${status}`,
           400
         );
       }
-      if (order.status === "Refunded" || order.status === "Cancelled") {
-        throw new ErrorHandler(`Order is already ${order.status}`, 400);
-      }
 
-      if (status === "Refunded" || status === "Cancelled") {
+      if (status === "Cancelled" || status === "Refund Requested") {
         for (const item of order.items) {
           if (item.itemType === "Course") {
             const enrollment = await Enrollment.findOne({
@@ -892,27 +1159,24 @@ router.put(
         }
       }
 
-      // Update payment status to Paid if not already (for legacy orders)
-      if (status === "Confirmed" && order.paymentStatus !== "Paid") {
-        order.paymentStatus = "Paid";
-      }
-
       order.status = status;
       order.statusHistory.push({
         status,
-        updatedAt: new Date(),
+        updatedBy: req.instructor._id.toString(),
+        updatedByModel: "Instructor",
         reason: reason || `Status updated to ${status}`,
       });
 
-      await order.save({ session, validateBeforeSave: false });
+      await order.save({ session });
 
       // Send email to customer
       try {
-        const customerName = order.customer?.username || "Customer";
         await sendMail({
           email: order.customer.email,
-          subject: `Course Order Update - Order #${order._id}`,
-          message: `Dear ${customerName},\n\nYour course order has been updated.\n\nOrder ID: ${
+          subject: `Course Order Update #${order._id}`,
+          message: `Dear ${
+            order.customer.username || "Customer"
+          },\n\nYour course order has been updated.\nOrder ID: ${
             order._id
           }\nStatus: ${status}\nTotal: $${order.totalAmount.toFixed(2)}\n${
             reason ? `Reason: ${reason}\n` : ""
@@ -925,27 +1189,25 @@ router.put(
             )
             .join(
               "\n"
-            )}\n\nView details in your account.\n\nBest regards,\nE-commerce Platform`,
+            )}\n\nView details in your account.\n\nBest regards,\nBlackandSell`,
         });
-        console.info("update-course-order-status: Email sent to customer", {
+        logger.info("update-course-order-status: Email sent to customer", {
           orderId: order._id,
           customerId: order.customer._id,
-          email: order.customer.email,
           status,
         });
       } catch (emailError) {
-        console.error(
+        logger.error(
           "update-course-order-status: Failed to send customer email",
           {
             orderId: order._id,
-            customerId: order.customer._id,
             error: emailError.message,
           }
         );
       }
 
       await session.commitTransaction();
-      console.info("update-course-order-status: Order updated", {
+      logger.info("update-course-order-status: Order updated", {
         orderId: order._id,
         instructorId: req.instructor._id,
         newStatus: status,
@@ -957,12 +1219,11 @@ router.put(
       });
     } catch (error) {
       await session.abortTransaction();
-      console.error("update-course-order-status error:", {
+      logger.error("update-course-order-status error", {
         message: error.message,
         stack: error.stack,
         orderId: req.params.id,
         instructorId: req.instructor?._id,
-        status: req.body.status,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
     } finally {
@@ -972,14 +1233,27 @@ router.put(
 );
 
 // Request refund (user)
-router.put(
+router.post(
   "/order-refund/:id",
   isAuthenticated,
+  [
+    param("id").isMongoId().withMessage("Invalid order ID"),
+    body("reason").notEmpty().withMessage("Refund reason is required"),
+    body("amount")
+      .optional()
+      .isFloat({ min: 0 })
+      .withMessage("Refund amount must be non-negative"),
+  ],
   catchAsyncErrors(async (req, res, next) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
-      const { status, reason } = req.body;
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
+      const { reason, amount } = req.body;
       const order = await Order.findById(req.params.id)
         .populate("shop instructor customer")
         .session(session);
@@ -993,49 +1267,70 @@ router.put(
           403
         );
       }
-      if (status !== "Refunded") {
-        throw new ErrorHandler("Invalid status for refund request", 400);
-      }
       if (!["Delivered", "Confirmed"].includes(order.status)) {
         throw new ErrorHandler(
           "Refunds can only be requested for delivered or confirmed orders",
           400
         );
       }
-      if (!reason) {
-        throw new ErrorHandler("Refund reason is required", 400);
+      if (!order.paymentInfo?.id) {
+        throw new ErrorHandler("No payment information found", 400);
       }
 
-      order.status = status;
+      const refundAmount = amount
+        ? Math.min(amount, order.totalAmount)
+        : order.totalAmount;
+      if (refundAmount <= 0) {
+        throw new ErrorHandler("Refund amount must be greater than 0", 400);
+      }
+
+      const refund = await stripe.refunds.create({
+        payment_intent: order.paymentInfo.id,
+        amount: Math.round(refundAmount * 100),
+        reason: "requested_by_customer",
+        metadata: {
+          orderId: order._id.toString(),
+          userId: req.user._id.toString(),
+          refundReason: reason,
+        },
+      });
+
+      order.status = "Refund Requested";
+      order.refundHistory.push({
+        refundId: refund.id,
+        amount: refundAmount,
+        reason,
+        status: "Requested",
+      });
       order.statusHistory.push({
-        status,
-        updatedAt: new Date(),
+        status: "Refund Requested",
+        updatedBy: req.user._id.toString(),
+        updatedByModel: "User",
         reason,
       });
 
-      await order.save({ session, validateBeforeSave: false });
+      await order.save({ session });
 
       // Send email to customer
       try {
-        const customerName = order.customer?.username || "Customer";
         await sendMail({
           email: order.customer.email,
-          subject: `Refund Request Submitted - Order #${order._id}`,
-          message: `Dear ${customerName},\n\nYour refund request has been submitted.\n\nOrder ID: ${
+          subject: `Refund Request Submitted #${order._id}`,
+          message: `Dear ${
+            order.customer.username || "Customer"
+          },\n\nYour refund request has been submitted.\nOrder ID: ${
             order._id
-          }\nStatus: ${status}\nReason: ${reason}\nTotal: $${order.totalAmount.toFixed(
+          }\nRefund Amount: $${refundAmount.toFixed(
             2
-          )}\n\nWe will review your request soon.\n\nBest regards,\nE-commerce Platform`,
+          )}\nReason: ${reason}\n\nWe will review your request soon.\n\nBest regards,\nBlackandSell`,
         });
-        console.info("order-refund: Email sent to customer", {
+        logger.info("order-refund: Email sent to customer", {
           orderId: order._id,
           customerId: order.customer._id,
-          email: order.customer.email,
         });
       } catch (emailError) {
-        console.error("order-refund: Failed to send customer email", {
+        logger.error("order-refund: Failed to send customer email", {
           orderId: order._id,
-          customerId: order.customer._id,
           error: emailError.message,
         });
       }
@@ -1048,12 +1343,12 @@ router.put(
           : `${order.instructor.fullname.firstName} ${order.instructor.fullname.lastName}`;
         await sendMail({
           email: recipient.email,
-          subject: `Refund Request Received - Order #${order._id}`,
-          message: `Dear ${recipientName},\n\nA refund request has been submitted for an order.\n\nOrder ID: ${
+          subject: `Refund Request Received #${order._id}`,
+          message: `Dear ${recipientName},\n\nA refund request has been submitted.\nOrder ID: ${
             order._id
-          }\nReason: ${reason}\nTotal: $${order.totalAmount.toFixed(
+          }\nRefund Amount: $${refundAmount.toFixed(
             2
-          )}\nItems:\n${order.items
+          )}\nReason: ${reason}\nItems:\n${order.items
             .map(
               (item) =>
                 `- ${item.name} (Qty: ${
@@ -1062,40 +1357,38 @@ router.put(
             )
             .join(
               "\n"
-            )}\n\nPlease review and process the refund in your dashboard.\n\nBest regards,\nE-commerce Platform`,
+            )}\n\nPlease review in your dashboard.\n\nBest regards,\nBlackandSell`,
         });
-        console.info("order-refund: Email sent to recipient", {
+        logger.info("order-refund: Email sent to recipient", {
           orderId: order._id,
           recipientId: recipient._id,
-          email: recipient.email,
         });
       } catch (emailError) {
-        console.error("order-refund: Failed to send recipient email", {
+        logger.error("order-refund: Failed to send recipient email", {
           orderId: order._id,
-          recipientId: order.shop?._id || order.instructor?._id,
           error: emailError.message,
         });
       }
 
       await session.commitTransaction();
-      console.info("order-refund: Refund requested", {
+      logger.info("order-refund: Refund requested", {
         orderId: order._id,
-        customerId: req.user._id,
-        reason,
+        refundId: refund.id,
+        amount: refundAmount,
       });
 
       res.status(200).json({
         success: true,
+        message: "Refund request processed successfully",
+        refundId: refund.id,
         order,
-        message: "Order refund request submitted successfully",
       });
     } catch (error) {
       await session.abortTransaction();
-      console.error("order-refund error:", {
+      logger.error("order-refund error", {
         message: error.message,
         stack: error.stack,
         orderId: req.params.id,
-        customerId: req.user?._id,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
     } finally {
@@ -1104,14 +1397,14 @@ router.put(
   })
 );
 
-// Approve refund (seller or instructor)
+// Approve or reject refund (seller or instructor)
 router.put(
   "/order-refund-success/:id",
   catchAsyncErrors(async (req, res, next) => {
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
-      const { status, reason } = req.body;
+      const { status, reason, refundId } = req.body;
       const order = await Order.findById(req.params.id)
         .populate("shop instructor customer")
         .session(session);
@@ -1119,13 +1412,15 @@ router.put(
       if (!order) {
         throw new ErrorHandler("Order not found", 404);
       }
-      if (status !== "Refunded") {
-        throw new ErrorHandler("Invalid status for refund approval", 400);
+      if (!["Approved", "Rejected"].includes(status)) {
+        throw new ErrorHandler("Invalid refund status", 400);
       }
-      if (order.status !== "Refunded") {
-        throw new ErrorHandler("Order must be in 'Refunded' status", 400);
+      if (order.status !== "Refund Requested") {
+        throw new ErrorHandler(
+          "Order must be in 'Refund Requested' status",
+          400
+        );
       }
-
       if (
         order.shop &&
         (!req.seller || order.shop._id.toString() !== req.seller._id.toString())
@@ -1146,144 +1441,154 @@ router.put(
         );
       }
 
-      // Update stock or enrollments
-      for (const item of order.items) {
-        if (item.itemType === "Product") {
-          const product = await Product.findById(item.itemId).session(session);
-          if (!product) {
-            throw new ErrorHandler(`Product not found: ${item.itemId}`, 404);
-          }
-          product.stock += item.quantity;
-          product.sold_out = Math.max(
-            0,
-            (product.sold_out || 0) - item.quantity
-          );
-          await product.save({ session, validateBeforeSave: false });
-          console.debug("order-refund-success: Product stock restored", {
-            productId: item.itemId,
-            name: item.name,
-            quantity: item.quantity,
-            newStock: product.stock,
-            newSoldOut: product.sold_out,
-          });
-        } else if (item.itemType === "Course") {
-          const enrollment = await Enrollment.findOne({
-            user: order.customer._id,
-            course: item.itemId,
-          }).session(session);
-          if (enrollment) {
-            enrollment.status = "Dropped";
-            await enrollment.save({ session });
-          }
-          const course = await Course.findById(item.itemId).session(session);
-          if (course) {
-            course.enrollmentCount = Math.max(
-              0,
-              course.enrollmentCount - item.quantity
+      const refundRecord = order.refundHistory.find(
+        (r) => r.refundId === refundId
+      );
+      if (!refundRecord) {
+        throw new ErrorHandler("Refund request not found", 404);
+      }
+
+      refundRecord.status = status;
+      refundRecord.processedAt = new Date();
+      refundRecord.reason = reason || refundRecord.reason;
+
+      if (status === "Approved") {
+        order.status = "Refund Success";
+        order.paymentInfo.status = "Refunded";
+        for (const item of order.items) {
+          if (item.itemType === "Product") {
+            const product = await Product.findById(item.itemId).session(
+              session
             );
-            await course.save({ session });
+            if (product) {
+              product.stock += item.quantity;
+              product.sold_out = Math.max(
+                0,
+                (product.sold_out || 0) - item.quantity
+              );
+              await product.save({ session });
+              logger.debug("order-refund-success: Product stock restored", {
+                productId: item.itemId,
+                quantity: item.quantity,
+                newStock: product.stock,
+              });
+            }
+          } else if (item.itemType === "Course") {
+            const enrollment = await Enrollment.findOne({
+              user: order.customer._id,
+              course: item.itemId,
+            }).session(session);
+            if (enrollment) {
+              enrollment.status = "Dropped";
+              await enrollment.save({ session });
+            }
+            const course = await Course.findById(item.itemId).session(session);
+            if (course) {
+              course.enrollmentCount = Math.max(
+                0,
+                course.enrollmentCount - item.quantity
+              );
+              await course.save({ session });
+            }
           }
         }
+
+        // Update balance
+        if (order.shop) {
+          const shop = await Shop.findById(order.shop._id).session(session);
+          const serviceCharge = refundRecord.amount * 0.1;
+          const shopAmount = refundRecord.amount - serviceCharge;
+          shop.availableBalance = Math.max(
+            0,
+            (shop.availableBalance || 0) - shopAmount
+          );
+          shop.transactions.push({
+            amount: -shopAmount,
+            type: "Refund",
+            status: "Succeeded",
+            createdAt: new Date(),
+            metadata: { orderId: order._id, source: "Refund Processed" },
+          });
+          await shop.save({ session });
+        } else if (order.instructor) {
+          const instructor = await Instructor.findById(
+            order.instructor._id
+          ).session(session);
+          const serviceCharge = refundRecord.amount * 0.1;
+          const instructorAmount = refundRecord.amount - serviceCharge;
+          instructor.availableBalance = Math.max(
+            0,
+            (instructor.availableBalance || 0) - instructorAmount
+          );
+          instructor.transactions.push({
+            amount: -instructorAmount,
+            type: "Refund",
+            status: "Succeeded",
+            createdAt: new Date(),
+            metadata: { orderId: order._id, source: "Refund Processed" },
+          });
+          await instructor.save({ session });
+        }
+      } else {
+        order.status = "Delivered"; // Revert to Delivered if rejected
       }
 
-      // Update balance
-      if (order.shop) {
-        const shop = await Shop.findById(order.shop._id).session(session);
-        if (!shop) {
-          throw new ErrorHandler("Shop not found", 404);
-        }
-        const serviceCharge = order.totalAmount * 0.1;
-        const shopAmount = order.totalAmount - serviceCharge;
-        shop.availableBalance = Math.max(
-          0,
-          (shop.availableBalance || 0) - shopAmount
-        );
-        shop.transactions.push({
-          amount: -shopAmount,
-          type: "Refund",
-          status: "Succeeded",
-          createdAt: new Date(),
-          metadata: { orderId: order._id, source: "Refund Processed" },
-        });
-        await shop.save({ session, validateBeforeSave: false });
-      } else if (order.instructor) {
-        const instructor = await Instructor.findById(
-          order.instructor._id
-        ).session(session);
-        if (!instructor) {
-          throw new ErrorHandler("Instructor not found", 404);
-        }
-        const serviceCharge = order.totalAmount * 0.1;
-        const instructorAmount = order.totalAmount - serviceCharge;
-        instructor.availableBalance = Math.max(
-          0,
-          (instructor.availableBalance || 0) - instructorAmount
-        );
-        instructor.transactions.push({
-          amount: -instructorAmount,
-          type: "Refund",
-          status: "Succeeded",
-          createdAt: new Date(),
-          metadata: { orderId: order._id, source: "Refund Processed" },
-        });
-        await instructor.save({ session, validateBeforeSave: false });
-      }
-
-      order.status = status;
-      order.paymentStatus = "Refunded";
       order.statusHistory.push({
-        status,
-        updatedAt: new Date(),
-        reason: reason || "Refund approved",
+        status: order.status,
+        updatedBy: (req.seller || req.instructor)._id.toString(),
+        updatedByModel: req.seller ? "Seller" : "Instructor",
+        reason: reason || `Refund ${status.toLowerCase()}`,
       });
 
-      await order.save({ session, validateBeforeSave: false });
+      await order.save({ session });
 
       // Send email to customer
       try {
-        const customerName = order.customer?.username || "Customer";
         await sendMail({
           email: order.customer.email,
-          subject: `Refund Approved - Order #${order._id}`,
-          message: `Dear ${customerName},\n\nYour refund has been approved.\n\nOrder ID: ${
+          subject: `Refund ${status} #${order._id}`,
+          message: `Dear ${
+            order.customer.username || "Customer"
+          },\n\nYour refund request has been ${status.toLowerCase()}.\nOrder ID: ${
             order._id
-          }\nTotal: $${order.totalAmount.toFixed(2)}\nReason: ${
-            reason || "Refund approved"
-          }\n\nThe amount will be processed soon.\n\nBest regards,\nE-commerce Platform`,
+          }\nRefund Amount: $${refundRecord.amount.toFixed(2)}\nReason: ${
+            reason || "No reason provided"
+          }\n\n${
+            status === "Approved"
+              ? "The amount will be processed soon."
+              : "Contact support for more details."
+          }\n\nBest regards,\nBlackandSell`,
         });
-        console.info("order-refund-success: Email sent to customer", {
+        logger.info("order-refund-success: Email sent to customer", {
           orderId: order._id,
           customerId: order.customer._id,
-          email: order.customer.email,
+          refundStatus: status,
         });
       } catch (emailError) {
-        console.error("order-refund-success: Failed to send customer email", {
+        logger.error("order-refund-success: Failed to send customer email", {
           orderId: order._id,
-          customerId: order.customer._id,
           error: emailError.message,
         });
       }
 
       await session.commitTransaction();
-      console.info("order-refund-success: Refund approved", {
+      logger.info("order-refund-success: Refund processed", {
         orderId: order._id,
-        shopId: order.shop?._id,
-        instructorId: order.instructor?._id,
-        reason,
+        refundId,
+        status,
       });
 
       res.status(200).json({
         success: true,
-        message: "Order refund processed successfully",
+        message: `Refund request ${status.toLowerCase()} successfully`,
+        order,
       });
     } catch (error) {
       await session.abortTransaction();
-      console.error("order-refund-success error:", {
+      logger.error("order-refund-success error", {
         message: error.message,
         stack: error.stack,
         orderId: req.params.id,
-        shopId: req.seller?._id,
-        instructorId: req.instructor?._id,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
     } finally {
@@ -1296,53 +1601,63 @@ router.put(
 router.delete(
   "/delete-order/:id",
   isSeller,
+  [param("id").isMongoId().withMessage("Invalid order ID")],
   catchAsyncErrors(async (req, res, next) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
-      const order = await Order.findById(req.params.id).populate("shop");
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
+      const order = await Order.findById(req.params.id)
+        .populate("shop")
+        .session(session);
 
       if (!order) {
-        return next(new ErrorHandler("Order not found", 404));
+        throw new ErrorHandler("Order not found", 404);
       }
       if (
         !order.shop ||
         order.shop._id.toString() !== req.seller._id.toString()
       ) {
-        return next(
-          new ErrorHandler(
-            "Unauthorized: Order does not belong to your shop",
-            403
-          )
+        throw new ErrorHandler(
+          "Unauthorized: Order does not belong to your shop",
+          403
         );
       }
       if (!["Pending", "Cancelled"].includes(order.status)) {
-        return next(
-          new ErrorHandler(
-            "Only Pending or Cancelled orders can be deleted",
-            400
-          )
+        throw new ErrorHandler(
+          "Only Pending or Cancelled orders can be deleted",
+          400
         );
       }
 
-      await Order.deleteOne({ _id: req.params.id });
+      await Order.deleteOne({ _id: req.params.id }, { session });
 
-      console.info("delete-order: Order deleted", {
+      logger.info("delete-order: Order deleted", {
         orderId: req.params.id,
         shopId: req.seller._id,
         status: order.status,
       });
+
+      await session.commitTransaction();
 
       res.status(200).json({
         success: true,
         message: "Order deleted successfully",
       });
     } catch (error) {
-      console.error("delete-order error:", {
+      await session.abortTransaction();
+      logger.error("delete-order error", {
         message: error.message,
         stack: error.stack,
         orderId: req.params.id,
-        shopId: req.seller?._id,
       });
       return next(new ErrorHandler(error.message, error.statusCode || 500));
+    } finally {
+      session.endSession();
     }
   })
 );
@@ -1352,13 +1667,54 @@ router.get(
   "/admin-all-orders",
   isAuthenticated,
   isAdmin("admin"),
+  [
+    query("status")
+      .optional()
+      .isIn([
+        "Pending",
+        "Confirmed",
+        "Shipped",
+        "Delivered",
+        "Cancelled",
+        "Refund Requested",
+        "Refund Success",
+      ])
+      .withMessage("Invalid status"),
+    query("page")
+      .optional()
+      .isInt({ min: 1 })
+      .withMessage("Invalid page number"),
+    query("limit").optional().isInt({ min: 1 }).withMessage("Invalid limit"),
+    query("sortBy")
+      .optional()
+      .isIn(["createdAt", "totalAmount", "status"])
+      .withMessage("Invalid sortBy field"),
+    query("sortOrder")
+      .optional()
+      .isIn(["asc", "desc"])
+      .withMessage("Invalid sortOrder"),
+  ],
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { page = 1, limit = 10, status } = req.query;
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
+      const {
+        status,
+        page = 1,
+        limit = 10,
+        sortBy = "createdAt",
+        sortOrder = "desc",
+      } = req.query;
       const query = status ? { status } : {};
 
+      const sort = {};
+      sort[sortBy] = sortOrder === "asc" ? 1 : -1;
+
       const orders = await Order.find(query)
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip((page - 1) * limit)
         .limit(Number(limit))
         .populate("shop", "name email")
@@ -1370,7 +1726,7 @@ router.get(
 
       const total = await Order.countDocuments(query);
 
-      console.info("admin-all-orders: Orders retrieved", {
+      logger.info("admin-all-orders: Orders retrieved", {
         orderCount: orders.length,
         page,
         limit,
@@ -1385,10 +1741,9 @@ router.get(
         pages: Math.ceil(total / limit),
       });
     } catch (error) {
-      console.error("admin-all-orders error:", {
+      logger.error("admin-all-orders error", {
         message: error.message,
         stack: error.stack,
-        query: req.query,
       });
       return next(new ErrorHandler(error.message, 500));
     }
@@ -1399,15 +1754,18 @@ router.get(
 router.get(
   "/shop/stats/:shopId",
   isSeller,
+  [param("shopId").isMongoId().withMessage("Invalid shop ID")],
   catchAsyncErrors(async (req, res, next) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
       if (req.seller._id.toString() !== req.params.shopId) {
         return next(
           new ErrorHandler("Unauthorized to access shop statistics", 403)
         );
-      }
-      if (!mongoose.Types.ObjectId.isValid(req.params.shopId)) {
-        return next(new ErrorHandler("Invalid shop ID", 400));
       }
 
       const stats = await Order.aggregate([
@@ -1415,7 +1773,7 @@ router.get(
         {
           $facet: {
             totalSales: [
-              { $match: { status: { $in: ["Delivered", "Refunded"] } } },
+              { $match: { status: { $in: ["Delivered", "Refund Success"] } } },
               { $group: { _id: null, total: { $sum: "$totalAmount" } } },
             ],
             pendingOrders: [
@@ -1424,6 +1782,10 @@ router.get(
                   status: { $in: ["Pending", "Confirmed", "Shipped"] },
                 },
               },
+              { $count: "count" },
+            ],
+            refundRequests: [
+              { $match: { status: "Refund Requested" } },
               { $count: "count" },
             ],
             totalOrders: [{ $count: "count" }],
@@ -1444,11 +1806,12 @@ router.get(
       const result = {
         totalSales: stats[0].totalSales[0]?.total || 0,
         pendingOrders: stats[0].pendingOrders[0]?.count || 0,
+        refundRequests: stats[0].refundRequests[0]?.count || 0,
         totalOrders: stats[0].totalOrders[0]?.count || 0,
         recentOrders: stats[0].recentOrders[0]?.count || 0,
       };
 
-      console.info("shop-stats: Statistics retrieved", {
+      logger.info("shop-stats: Statistics retrieved", {
         shopId: req.params.shopId,
         stats: result,
       });
@@ -1458,7 +1821,7 @@ router.get(
         stats: result,
       });
     } catch (error) {
-      console.error("shop-stats error:", {
+      logger.error("shop-stats error", {
         message: error.message,
         stack: error.stack,
         shopId: req.params.shopId,
@@ -1472,15 +1835,18 @@ router.get(
 router.get(
   "/instructor/stats/:instructorId",
   isInstructor,
+  [param("instructorId").isMongoId().withMessage("Invalid instructor ID")],
   catchAsyncErrors(async (req, res, next) => {
     try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return next(new ErrorHandler(errors.array()[0].msg, 400));
+      }
+
       if (req.instructor._id.toString() !== req.params.instructorId) {
         return next(
           new ErrorHandler("Unauthorized to access instructor statistics", 403)
         );
-      }
-      if (!mongoose.Types.ObjectId.isValid(req.params.instructorId)) {
-        return next(new ErrorHandler("Invalid instructor ID", 400));
       }
 
       const stats = await Promise.all([
@@ -1493,8 +1859,14 @@ router.get(
           {
             $facet: {
               totalSales: [
-                { $match: { status: { $in: ["Confirmed", "Refunded"] } } },
+                {
+                  $match: { status: { $in: ["Confirmed", "Refund Success"] } },
+                },
                 { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+              ],
+              refundRequests: [
+                { $match: { status: "Refund Requested" } },
+                { $count: "count" },
               ],
               totalOrders: [{ $count: "count" }],
               recentOrders: [
@@ -1530,13 +1902,14 @@ router.get(
 
       const result = {
         totalSales: stats[0][0].totalSales[0]?.total || 0,
+        refundRequests: stats[0][0].refundRequests[0]?.count || 0,
         totalOrders: stats[0][0].totalOrders[0]?.count || 0,
         recentOrders: stats[0][0].recentOrders[0]?.count || 0,
         totalEnrollments: stats[1][0]?.totalEnrollments || 0,
         completedEnrollments: stats[1][0]?.completed || 0,
       };
 
-      console.info("instructor-stats: Statistics retrieved", {
+      logger.info("instructor-stats: Statistics retrieved", {
         instructorId: req.params.instructorId,
         stats: result,
       });
@@ -1546,7 +1919,7 @@ router.get(
         stats: result,
       });
     } catch (error) {
-      console.error("instructor-stats error:", {
+      logger.error("instructor-stats error", {
         message: error.message,
         stack: error.stack,
         instructorId: req.params.instructorId,

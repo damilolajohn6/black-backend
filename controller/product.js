@@ -59,6 +59,7 @@ router.post(
         variations,
         isMadeInCanada,
         canadianCertification,
+        flashSale,
       } = req.body;
 
       if (!name || !description || !category || !price || stock === undefined) {
@@ -103,6 +104,7 @@ router.post(
         variations: variations || [],
         isMadeInCanada: isMadeInCanada || false,
         canadianCertification: canadianCertification || "",
+        flashSale: flashSale || {},
       };
 
       const product = await Product.create(productData);
@@ -184,6 +186,7 @@ router.put(
         variations,
         isMadeInCanada,
         canadianCertification,
+        flashSale,
       } = req.body;
 
       if (!name || !description || !category || !price || stock === undefined) {
@@ -225,6 +228,7 @@ router.put(
       product.variations = variations || [];
       product.isMadeInCanada = isMadeInCanada || false;
       product.canadianCertification = canadianCertification || "";
+      product.flashSale = flashSale || {};
 
       await product.save();
       console.info("update-product: Product updated successfully", {
@@ -241,66 +245,6 @@ router.put(
         body: req.body,
         sellerId: req.seller?._id || "missing",
         productId,
-      });
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
-
-// Get single product
-router.get(
-  "/get-product/:id",
-  isSeller,
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const productId = req.params.id;
-      if (!productId.match(/^[0-9a-fA-F]{24}$/)) {
-        console.error("get-product: Invalid product ID format", { productId });
-        return next(new ErrorHandler("Invalid product ID format", 400));
-      }
-
-      const product = await Product.findById(productId)
-        .populate("shop", "name")
-        .populate("seller", "_id");
-      if (!product) {
-        console.error("get-product: Product not found", { productId });
-        return next(new ErrorHandler("Product not found", 404));
-      }
-      console.debug("get-product: Product fetched", {
-        productId,
-        sellerField: product.seller,
-        reqSellerId: req.seller?._id,
-      });
-      if (
-        !product.seller ||
-        !req.seller?._id ||
-        product.seller._id.toString() !== req.seller._id.toString()
-      ) {
-        console.error("get-product: Unauthorized access", {
-          productId,
-          sellerId: req.seller?._id,
-          productSellerId: product.seller?._id,
-        });
-        return next(
-          new ErrorHandler(
-            "Unauthorized: Product does not belong to seller",
-            403
-          )
-        );
-      }
-
-      console.info("get-product: Product retrieved successfully", {
-        productId,
-      });
-      res.status(200).json({
-        success: true,
-        product,
-      });
-    } catch (error) {
-      console.error("get-product error:", {
-        message: error.message,
-        productId: req.params.id,
-        sellerId: req.seller?._id || "missing",
       });
       return next(new ErrorHandler(error.message, 400));
     }
@@ -338,41 +282,6 @@ router.post(
         public_id: req.body.public_id,
       });
       return next(new ErrorHandler("Failed to delete image", 500));
-    }
-  })
-);
-
-// Get all products of a shop
-router.get(
-  "/get-all-products-shop/:id",
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const shopId = req.params.id;
-      if (!shopId.match(/^[0-9a-fA-F]{24}$/)) {
-        console.error("get-all-products-shop: Invalid shop ID format", {
-          shopId,
-        });
-        return next(new ErrorHandler("Invalid shop ID format", 400));
-      }
-
-      const products = await Product.find({ shop: shopId })
-        .populate("shop", "name")
-        .populate("seller", "_id");
-      console.info("get-all-products-shop: Products retrieved successfully", {
-        shopId,
-        productCount: products.length,
-        productIds: products.map((p) => p._id.toString()),
-      });
-      res.status(200).json({
-        success: true,
-        products,
-      });
-    } catch (error) {
-      console.error("get-all-products-shop error:", {
-        message: error.message,
-        shopId: req.params.id,
-      });
-      return next(new ErrorHandler(error.message, 400));
     }
   })
 );
@@ -469,41 +378,80 @@ router.delete(
   })
 );
 
-// Get all products
+// Get all products of a shop
 router.get(
-  "/get-all-products",
+  "/get-all-products-shop/:id",
+  isSeller,
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const products = await Product.find()
-        .sort({ createdAt: -1 })
+      const shopId = req.params.id;
+      const { page = 1, limit = 10 } = req.query;
+
+      if (!shopId.match(/^[0-9a-fA-F]{24}$/)) {
+        console.error("get-all-products-shop: Invalid shop ID format", {
+          shopId,
+        });
+        return next(new ErrorHandler("Invalid shop ID format", 400));
+      }
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const query = { shop: shopId };
+      const total = await Product.countDocuments(query);
+      const products = await Product.find(query)
         .populate("shop", "name")
-        .populate("seller", "_id");
-      console.info("get-all-products: Products retrieved successfully", {
+        .populate("seller", "_id name")
+        .skip(skip)
+        .limit(limitNum)
+        .sort({ createdAt: -1 });
+
+      console.info("get-all-products-shop: Products retrieved successfully", {
+        shopId,
         productCount: products.length,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        productIds: products.map((p) => p._id.toString()),
+        userId: req.user?._id,
       });
+
       res.status(200).json({
         success: true,
         products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
       });
     } catch (error) {
-      console.error("get-all-products error:", { message: error.message });
+      console.error("get-all-products-shop error:", {
+        message: error.message,
+        shopId: req.params.id,
+        userId: req.user?._id || "missing",
+      });
       return next(new ErrorHandler(error.message, 400));
     }
   })
 );
 
-// Create or update product review
-router.put(
-  "/create-new-review",
-  isAuthenticated,
+// Add product to flash sale
+router.post(
+  "/add-flash-sale/:id",
+  isSeller,
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { user, rating, comment, productId, orderId } = req.body;
+      const productId = req.params.id;
+      const { discountPrice, startDate, endDate, stockLimit } = req.body;
 
-      if (!rating || !comment || !productId || !orderId) {
-        return next(
-          new ErrorHandler("Missing required fields for review", 400)
-        );
+      if (!productId.match(/^[0-9a-fA-F]{24}$/)) {
+        console.error("add-flash-sale: Invalid product ID format", {
+          productId,
+        });
+        return next(new ErrorHandler("Invalid product ID format", 400));
       }
 
       const product = await Product.findById(productId).populate(
@@ -511,70 +459,932 @@ router.put(
         "_id"
       );
       if (!product) {
+        console.error("add-flash-sale: Product not found", { productId });
         return next(new ErrorHandler("Product not found", 404));
       }
 
-      const order = await Order.findById(orderId);
-      if (!order) {
-        return next(new ErrorHandler("Order not found", 404));
+      if (
+        !product.seller ||
+        !req.seller?._id ||
+        product.seller._id.toString() !== req.seller._id.toString()
+      ) {
+        console.error("add-flash-sale: Unauthorized access", {
+          productId,
+          sellerId: req.seller?._id,
+          productSellerId: product.seller?._id,
+        });
+        return next(
+          new ErrorHandler(
+            "Unauthorized: Product does not belong to seller",
+            403
+          )
+        );
       }
 
-      const cartItem = order.cart.find(
-        (item) => item._id.toString() === productId.toString()
+      if (
+        !discountPrice ||
+        !startDate ||
+        !endDate ||
+        stockLimit === undefined
+      ) {
+        return next(
+          new ErrorHandler(
+            "Missing required fields: discountPrice, startDate, endDate, stockLimit",
+            400
+          )
+        );
+      }
+
+      if (discountPrice >= product.price) {
+        return next(
+          new ErrorHandler(
+            "Flash sale price must be less than regular price",
+            400
+          )
+        );
+      }
+
+      if (new Date(startDate) >= new Date(endDate)) {
+        return next(new ErrorHandler("End date must be after start date", 400));
+      }
+
+      product.flashSale = {
+        isActive: true,
+        discountPrice: Number(discountPrice),
+        startDate: new Date(startDate),
+        endDate: new Date(endDate),
+        stockLimit: Number(stockLimit),
+      };
+
+      await product.save();
+      console.info("add-flash-sale: Product added to flash sale", {
+        productId,
+      });
+      res.status(200).json({
+        success: true,
+        product,
+      });
+    } catch (error) {
+      console.error("add-flash-sale error:", {
+        message: error.message,
+        productId: req.params.id,
+        sellerId: req.seller?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Remove product from flash sale
+router.post(
+  "/remove-flash-sale/:id",
+  isSeller,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      if (!productId.match(/^[0-9a-fA-F]{24}$/)) {
+        console.error("remove-flash-sale: Invalid product ID format", {
+          productId,
+        });
+        return next(new ErrorHandler("Invalid product ID format", 400));
+      }
+
+      const product = await Product.findById(productId).populate(
+        "seller",
+        "_id"
       );
-      if (!cartItem) {
-        return next(new ErrorHandler("Product not found in order", 400));
+      if (!product) {
+        console.error("remove-flash-sale: Product not found", { productId });
+        return next(new ErrorHandler("Product not found", 404));
+      }
+
+      if (
+        !product.seller ||
+        !req.seller?._id ||
+        product.seller._id.toString() !== req.seller._id.toString()
+      ) {
+        console.error("remove-flash-sale: Unauthorized access", {
+          productId,
+          sellerId: req.seller?._id,
+          productSellerId: product.seller?._id,
+        });
+        return next(
+          new ErrorHandler(
+            "Unauthorized: Product does not belong to seller",
+            403
+          )
+        );
+      }
+
+      product.flashSale = {
+        isActive: false,
+        discountPrice: undefined,
+        startDate: undefined,
+        endDate: undefined,
+        stockLimit: undefined,
+      };
+
+      await product.save();
+      console.info("remove-flash-sale: Product removed from flash sale", {
+        productId,
+      });
+      res.status(200).json({
+        success: true,
+        product,
+      });
+    } catch (error) {
+      console.error("remove-flash-sale error:", {
+        message: error.message,
+        productId: req.params.id,
+        sellerId: req.seller?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get single product
+router.get(
+  "/get-product/:id",
+  isSeller,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      if (!productId.match(/^[0-9a-fA-F]{24}$/)) {
+        console.error("get-product: Invalid product ID format", { productId });
+        return next(new ErrorHandler("Invalid product ID format", 400));
+      }
+
+      const product = await Product.findById(productId)
+        .populate("shop", "name")
+        .populate("seller", "_id");
+      if (!product) {
+        console.error("get-product: Product not found", { productId });
+        return next(new ErrorHandler("Product not found", 404));
+      }
+      console.debug("get-product: Product fetched", {
+        productId,
+        sellerField: product.seller,
+        reqSellerId: req.seller?._id,
+      });
+      if (
+        !product.seller ||
+        !req.seller?._id ||
+        product.seller._id.toString() !== req.seller._id.toString()
+      ) {
+        console.error("get-product: Unauthorized access", {
+          productId,
+          sellerId: req.seller?._id,
+          productSellerId: product.seller?._id,
+        });
+        return next(
+          new ErrorHandler(
+            "Unauthorized: Product does not belong to seller",
+            403
+          )
+        );
+      }
+
+      console.info("get-product: Product retrieved successfully", {
+        productId,
+      });
+      res.status(200).json({
+        success: true,
+        product,
+      });
+    } catch (error) {
+      console.error("get-product error:", {
+        message: error.message,
+        productId: req.params.id,
+        sellerId: req.seller?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get shop products by category
+router.get(
+  "/get-shop-products-by-category/:shopId/:category",
+  isSeller,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { shopId, category } = req.params;
+      const { page = 1, limit = 10 } = req.query;
+
+      // Validate shop ID format
+      if (!shopId.match(/^[0-9a-fA-F]{24}$/)) {
+        console.error("get-shop-products-by-category: Invalid shop ID format", {
+          shopId,
+        });
+        return next(new ErrorHandler("Invalid shop ID format", 400));
+      }
+
+      // Validate category
+      const validCategories = [
+        "electronics",
+        "clothing",
+        "home",
+        "books",
+        "toys",
+        "food",
+        "digital",
+        "beauty",
+        "sports",
+        "jewelry",
+        "automotive",
+        "health",
+        "baby",
+        "pet",
+        "office",
+        "garden",
+        "furniture",
+        "appliances",
+        "tools",
+        "hair care",
+        "skin care",
+        "bags",
+        "luggage",
+        "shoes",
+        "other",
+      ];
+      if (!validCategories.includes(category)) {
+        return next(new ErrorHandler("Invalid category", 400));
+      }
+
+      // Check if the shop exists and belongs to the requesting seller
+      const shop = await Shop.findById(shopId);
+      if (!shop) {
+        console.error("get-shop-products-by-category: Shop not found", {
+          shopId,
+        });
+        return next(new ErrorHandler("Shop not found", 404));
+      }
+
+      if (shop._id.toString() !== req.seller._id.toString()) {
+        console.error("get-shop-products-by-category: Unauthorized access", {
+          shopId,
+          sellerId: req.seller._id,
+          shopOwnerId: shop._id,
+        });
+        return next(
+          new ErrorHandler("Unauthorized: You don't own this shop", 403)
+        );
+      }
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const query = { shop: shopId, category };
+      const total = await Product.countDocuments(query);
+      const products = await Product.find(query)
+        .populate("shop", "name")
+        .populate("seller", "_id name")
+        .skip(skip)
+        .limit(limitNum)
+        .sort({ createdAt: -1 });
+
+      console.info(
+ "get-shop-products-by-category: Products retrieved successfully",
+        {
+          shopId,
+          category,
+          productCount: products.length,
+          total,
+          page: pageNum,
+          limit: limitNum,
+          sellerId: req.seller._id,
+        }
+      );
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-shop-products-by-category error:", {
+        message: error.message,
+        shopId: req.params.shopId,
+        category: req.params.category,
+        sellerId: req.seller?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Get all categories
+router.get(
+  "/get-categories",
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const categories = [
+        "electronics",
+        "clothing",
+        "home",
+        "books",
+        "toys",
+        "food",
+        "digital",
+        "beauty",
+        "sports",
+        "jewelry",
+        "automotive",
+        "health",
+        "baby",
+        "pet",
+        "office",
+        "garden",
+        "furniture",
+        "appliances",
+        "tools",
+        "hair care",
+        "skin care",
+        "bags",
+        "luggage",
+        "shoes",
+        "other",
+      ];
+      console.info("get-categories: Categories retrieved successfully", {
+        categoryCount: categories.length,
+      });
+      res.status(200).json({
+        success: true,
+        categories,
+      });
+    } catch (error) {
+      console.error("get-categories error:", { message: error.message });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get products by category
+router.get(
+  "/get-products-by-category/:category",
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { category } = req.params;
+      const { page = 1, limit = 10 } = req.query;
+
+      const validCategories = [
+        "electronics",
+        "clothing",
+        "home",
+        "books",
+        "toys",
+        "food",
+        "digital",
+        "beauty",
+        "sports",
+        "jewelry",
+        "automotive",
+        "health",
+        "baby",
+        "pet",
+        "office",
+        "garden",
+        "furniture",
+        "appliances",
+        "tools",
+        "hair care",
+        "skin care",
+        "bags",
+        "luggage",
+        "shoes",
+        "other",
+      ];
+      if (!validCategories.includes(category)) {
+        return next(new ErrorHandler("Invalid category", 400));
+      }
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const query = { category };
+      const total = await Product.countDocuments(query);
+      const products = await Product.find(query)
+        .populate("shop", "name")
+        .populate("seller", "_id name")
+        .skip(skip)
+        .limit(limitNum)
+        .sort({ createdAt: -1 });
+
+      console.info(
+        "get-products-by-category: Products retrieved successfully",
+        {
+          category,
+          productCount: products.length,
+          total,
+          page: pageNum,
+          limit: limitNum,
+          userId: req.user?._id,
+        }
+      );
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-products-by-category error:", {
+        message: error.message,
+        category: req.params.category,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get most popular products
+router.get(
+  "/get-popular-products",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { page = 1, limit = 10 } = req.query;
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const total = await Product.countDocuments();
+      const products = await Product.find()
+        .sort({ sold_out: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate("shop", "name")
+        .populate("seller", "_id name");
+
+      console.info("get-popular-products: Products retrieved successfully", {
+        productCount: products.length,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        userId: req.user?._id,
+      });
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-popular-products error:", {
+        message: error.message,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get all products authenticated users
+router.get(
+  "/get-all-products",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { page = 1, limit = 10 } = req.query;
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const total = await Product.countDocuments();
+      const products = await Product.find()
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate("shop", "name")
+        .populate("seller", "_id name");
+
+      console.info("get-all-products: Products retrieved successfully", {
+        productCount: products.length,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        userId: req.user?._id,
+      });
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-all-products error:", {
+        message: error.message,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get all products of a shop (authenticated users)
+router.get(
+  "/get-all-public-products-shop/:id",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const shopId = req.params.id;
+      const { page = 1, limit = 10 } = req.query;
+
+      if (!shopId.match(/^[0-9a-fA-F]{24}$/)) {
+        console.error("get-all-public-products-shop: Invalid shop ID format", {
+          shopId,
+        });
+        return next(new ErrorHandler("Invalid shop ID format", 400));
+      }
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const query = { shop: shopId };
+      const total = await Product.countDocuments(query);
+      const products = await Product.find(query)
+        .populate("shop", "name")
+        .populate("seller", "_id name")
+        .skip(skip)
+        .limit(limitNum)
+        .sort({ createdAt: -1 });
+
+      console.info(
+        "get-all-public-products-shop: Products retrieved successfully",
+        {
+          shopId,
+          productCount: products.length,
+          total,
+          page: pageNum,
+          limit: limitNum,
+          productIds: products.map((p) => p._id.toString()),
+          userId: req.user?._id,
+        }
+      );
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-all-products-shop error:", {
+        message: error.message,
+        shopId: req.params.id,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get single product (public, authenticated users)
+router.get(
+  "/get-product-public/:id",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      if (!productId.match(/^[0-9a-fA-F]{24}$/)) {
+        console.error("get-product-public: Invalid product ID format", {
+          productId,
+        });
+        return next(new ErrorHandler("Invalid product ID format", 400));
+      }
+
+      const product = await Product.findById(productId)
+        .populate("shop", "name")
+        .populate("seller", "_id name");
+      if (!product) {
+        console.error("get-product-public: Product not found", { productId });
+        return next(new ErrorHandler("Product not found", 404));
+      }
+
+      console.info("get-product-public: Product retrieved successfully", {
+        productId,
+        userId: req.user?._id,
+      });
+      res.status(200).json({
+        success: true,
+        product,
+      });
+    } catch (error) {
+      console.error("get-product-public error:", {
+        message: error.message,
+        productId: req.params.id,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get new products
+router.get(
+  "/get-new-products",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { page = 1, limit = 10 } = req.query;
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const total = await Product.countDocuments();
+      const products = await Product.find()
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate("shop", "name")
+        .populate("seller", "_id name");
+
+      console.info("get-new-products: Products retrieved successfully", {
+        productCount: products.length,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        userId: req.user?._id,
+      });
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-new-products error:", {
+        message: error.message,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get top-rated products
+router.get(
+  "/get-top-rated-products",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { page = 1, limit = 10 } = req.query;
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const query = { ratingsAverage: { $gte: 4 } };
+      const total = await Product.countDocuments(query);
+      const products = await Product.find(query)
+        .sort({ ratingsAverage: -1, ratingsQuantity: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate("shop", "name")
+        .populate("seller", "_id name");
+
+      console.info("get-top-rated-products: Products retrieved successfully", {
+        productCount: products.length,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        userId: req.user?._id,
+      });
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-top-rated-products error:", {
+        message: error.message,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Get flash sale products
+router.get(
+  "/get-flash-sale-products",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { page = 1, limit = 10 } = req.query;
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const query = {
+        "flashSale.isActive": true,
+        "flashSale.endDate": { $gte: new Date() },
+      };
+      const total = await Product.countDocuments(query);
+      const products = await Product.find(query)
+        .sort({ "flashSale.endDate": 1 })
+        .skip(skip)
+        .limit(limitNum)
+        .populate("shop", "name")
+        .populate("seller", "_id name");
+
+      console.info("get-flash-sale-products: Products retrieved successfully", {
+        productCount: products.length,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        userId: req.user?._id,
+      });
+
+      res.status(200).json({
+        success: true,
+        products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
+      });
+    } catch (error) {
+      console.error("get-flash-sale-products error:", {
+        message: error.message,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 400));
+    }
+  })
+);
+
+// Create product review
+router.post(
+  "/create-product-review/:productId",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { productId } = req.params;
+      const { rating, comment, images } = req.body;
+
+      if (!rating || rating < 1 || rating > 5) {
+        return next(
+          new ErrorHandler("Please provide a rating between 1-5", 400)
+        );
+      }
+
+      const product = await Product.findById(productId);
+      if (!product) {
+        return next(new ErrorHandler("Product not found", 404));
+      }
+
+      const hasPurchased = await Order.exists({
+        customer: req.user._id,
+        "items.itemId": productId,
+        status: "Delivered",
+      });
+
+      if (!hasPurchased && req.user.role !== "admin") {
+        return next(
+          new ErrorHandler(
+            "You must purchase this product before leaving a review",
+            403
+          )
+        );
+      }
+
+      const imagesLinks = [];
+      if (images && Array.isArray(images)) {
+        for (const image of images) {
+          const result = await cloudinary.v2.uploader.upload(image, {
+            folder: "reviews",
+          });
+          imagesLinks.push({
+            public_id: result.public_id,
+            url: result.secure_url,
+          });
+        }
       }
 
       const review = {
         user: req.user._id,
-        name: req.user.name,
+        name: req.user.fullname?.firstName || req.user.username,
         rating: Number(rating),
         comment,
-        createdAt: new Date(),
+        images: imagesLinks,
       };
 
-      const existingReview = product.reviews.find(
-        (rev) => rev.user.toString() === req.user._id.toString()
-      );
-
-      if (existingReview) {
-        product.reviews = product.reviews.map((rev) =>
-          rev.user.toString() === req.user._id.toString() ? review : rev
-        );
-      } else {
-        product.reviews.push(review);
-      }
-
-      product.ratingsQuantity = product.reviews.length;
+      product.reviews.push(review);
       product.ratingsAverage =
-        product.reviews.reduce((acc, rev) => acc + rev.rating, 0) /
-          product.ratingsQuantity || 0;
+        product.reviews.reduce((acc, item) => item.rating + acc, 0) /
+        product.reviews.length;
+      product.numOfReviews = product.reviews.length;
 
-      await product.save({ validateBeforeSave: false });
+      await product.save();
 
-      // Update order
-      order.cart = order.cart.map((item) =>
-        item._id.toString() === productId.toString()
-          ? { ...item, isReviewed: true }
-          : item
-      );
-      await order.save();
-
-      console.info("create-new-review: Review submitted successfully", {
-        productId,
-        userId: req.user._id,
-      });
-      res.status(200).json({
+      res.status(201).json({
         success: true,
-        message: "Review submitted successfully",
+        review,
+        shareLink: `${process.env.FRONTEND_URL}/product/${productId}/reviews/${
+          product.reviews[product.reviews.length - 1]._id
+        }`,
       });
     } catch (error) {
-      console.error("create-new-review error:", {
+      console.error("create-product-review error:", {
         message: error.message,
-        body: req.body,
+        productId: req.params.productId,
+        userId: req.user?._id || "missing",
       });
-      return next(new ErrorHandler(error.message, 400));
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
+);
+
+// Get product review by ID (publicly accessible)
+router.get(
+  "/get-product-review/:productId/:reviewId",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { productId, reviewId } = req.params;
+
+      const product = await Product.findById(productId);
+      if (!product) {
+        return next(new ErrorHandler("Product not found", 404));
+      }
+
+      const review = product.reviews.id(reviewId);
+      if (!review) {
+        return next(new ErrorHandler("Review not found", 404));
+      }
+
+      const user = await User.findById(review.user).select("username avatar");
+
+      res.status(200).json({
+        success: true,
+        review: {
+          ...review.toObject(),
+          user: {
+            username: user.username,
+            avatar: user.avatar,
+          },
+        },
+        product: {
+          name: product.name,
+          images: product.images,
+          _id: product._id,
+        },
+      });
+    } catch (error) {
+      console.error("get-product-review error:", {
+        message: error.message,
+        productId: req.params.productId,
+        reviewId: req.params.reviewId,
+        userId: req.user?._id || "missing",
+      });
+      return next(new ErrorHandler(error.message, 500));
     }
   })
 );
@@ -586,19 +1396,43 @@ router.get(
   isAdmin("Admin"),
   catchAsyncErrors(async (req, res, next) => {
     try {
+      const { page = 1, limit = 10 } = req.query;
+
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      const skip = (pageNum - 1) * limitNum;
+
+      const total = await Product.countDocuments();
       const products = await Product.find()
         .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
         .populate("shop", "name")
-        .populate("seller", "_id");
+        .populate("seller", "_id name");
+
       console.info("admin-all-products: Products retrieved successfully", {
         productCount: products.length,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        userId: req.user?._id,
       });
+
       res.status(200).json({
         success: true,
         products,
+        pagination: {
+          total,
+          page: pageNum,
+          pages: Math.ceil(total / limitNum),
+          limit: limitNum,
+        },
       });
     } catch (error) {
-      console.error("admin-all-products error:", { message: error.message });
+      console.error("admin-all-products error:", {
+        message: error.message,
+        userId: req.user?._id || "missing",
+      });
       return next(new ErrorHandler(error.message, 500));
     }
   })

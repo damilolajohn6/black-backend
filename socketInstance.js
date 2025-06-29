@@ -1,4 +1,3 @@
-// socketInstance.js
 let ioInstance = null;
 
 const setIo = (io) => {
@@ -12,6 +11,10 @@ const getIo = () => {
   return ioInstance;
 };
 
-const { getReceiverSocketId } = require("./socket/socket");
+const getReceiverSocketId = (receiverId) => {
+  return require("./socket/socket").getReceiverSocketId(receiverId);
+};
+
+
 
 module.exports = { setIo, getIo, getReceiverSocketId };

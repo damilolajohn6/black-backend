@@ -9,7 +9,6 @@ logs/
 *.log
 *.log.*
 
-
 # Environment variables
 .env
 
